@@ -100,8 +100,8 @@ func poolBalances(ctx context.Context, client *rpc.Client, cp *ConstantProduct) 
 
 func main() {
 	var (
-		rpcEP    = flag.String("rpc", rpc.MainNetBeta_RPC, fmt.Sprintf("RPC to connect to, defaults to %s", rpc.MainNetBeta_RPC))
-		poolAddr = flag.String("pool", ourCorePoolAddr, fmt.Sprintf("Pool to interact with, defaults to %s", ourCorePoolAddr))
+		rpcEP    = flag.String("rpc", rpc.MainNetBeta_RPC, "RPC to connect to")
+		poolAddr = flag.String("pool", ourCorePoolAddr, "Pool to interact with")
 		// mintAddr = flag.String("token", wSOLMintAddr, fmt.Sprintf("Token address to buy/sell, defaults to %s", wSOLMintAddr))
 	)
 	flag.Parse()
