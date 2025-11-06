@@ -125,6 +125,10 @@ in 6 month knows, or lacks.
 
 So, let's do it.
 
+> although I was hoping I might manage to cheat my way into a happy weekend and
+> see if their APIs are actually open source, alas, they're not. Using my brain
+> then.
+
 - [x] IDL ~= ABI, it seems I need to pack and unpack the bits in correct order -
       pun intended - luckily someone else did the hard work and put together
       anchor-go which can take an IDL and generate a Go package for us. I can
@@ -141,9 +145,39 @@ So, let's do it.
       nicely documented [CPI repo](https://github.com/raydium-io/raydium-cpi).
       Might prove useful.
 
-> although I was hoping I might manage to cheat my way into a happy weekend and
-> see if their APIs are actually open source, alas, they're not. Using my brain
-> then.
+<details>
+<summary>quoting</summary>
+
+So the math isn't fundamentally complex, constant product AMMs essentially
+define a price relation between `Token0` and `Token1` as `P = Token0 * Token1`.
+Which is the amount the LP is holding of `Token0` and `Token1`.
+
+If we're swapping, we need to determine the direction. Buying `Token0`
+essentially means we're adding `Token1` to get `Token0`. Selling `Token0` means
+the opposite, Adding `Token0` to get `Token1`. This changes the equation to this
+
+Buying `Token0`, we remove `Token0`, we add `Token1`
+
+```
+amRemove = amountof(Token0)
+amAdd = amountof(Token1)
+
+P = (Token0 - amRemove) * (Token1 + amAdd)
+```
+
+At this point, we know what we're willing to pay, we're paying (adding)
+`Token1`, to buy (remove) `Token0`. So out of amRemove and `amAdd`, we only know
+the added part. Rearranging the equation to solve for `amRemove`
+
+```
+amRemove = (Token0 * amAdd) / (Token1 + amAdd)
+```
+
+This doesn't factor fees, for now we'll ignore that.
+
+</details>
+
+<br />
 
 - [ ] With the quote determined, I make a trade. I have no idea how this will
       work out, I've been looking over CP-Swap's source code and I see two swap
