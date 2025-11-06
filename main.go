@@ -35,6 +35,15 @@ type ConstantProduct struct {
 	Token1Amount big.Int
 }
 
+func humanAmount(raw *big.Int, decimals uint8, precision int) string {
+	if raw == nil {
+		return "0"
+	}
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	rat := new(big.Rat).SetFrac(raw, scale)
+	return rat.FloatString(precision)
+}
+
 // NOTE(@hadydotai): boy will this hurt. This function will likely have high CPU cache contention.
 // If we're calling this on a tight loop, we're going to end up with heavy
 // CPU cache eviction as multiple cores contesting the shared ConstantProduct structure. Either I split the data,
@@ -123,9 +132,9 @@ func main() {
 	t.AppendRow(table.Row{
 		"Value",
 		// Token0
-		cp.Token0Amount.String(),
+		humanAmount(&cp.Token0Amount, pool.Mint0Decimals, int(pool.Mint0Decimals)),
 		// Token1
-		cp.Token1Amount.String(),
+		humanAmount(&cp.Token1Amount, pool.Mint1Decimals, int(pool.Mint1Decimals)),
 	})
 	t.Render()
 }
