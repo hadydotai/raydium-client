@@ -131,7 +131,7 @@ So, let's do it.
       get the IDL from `anchor idl fetch` and we're home sailing.
       [Raydium also publishes their IDL](https://github.com/raydium-io/raydium-idl).
       But we'll just generate it.
-- [ ] Then I reckon I want to fetch details about my pool. Seems fitting because
+- [x] Then I reckon I want to fetch details about my pool. Seems fitting because
       I know what to expect, we'll do just that.
 - [ ] If fetching details about my pool isn't a problem, we'll start thinking
       about quotes. Constant product quotes are pretty straight forward. So I'll
