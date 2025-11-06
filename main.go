@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -44,47 +43,58 @@ func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	return rat.FloatString(precision)
 }
 
-// NOTE(@hadydotai): boy will this hurt. This function will likely have high CPU cache contention.
-// If we're calling this on a tight loop, we're going to end up with heavy
-// CPU cache eviction as multiple cores contesting the shared ConstantProduct structure. Either I split the data,
-// or pad to align on cache boundaries.
-// For now it's fine, but I reckon when I start hitting this function for every pool, in a very long list of
-// pools, getting balances for each pair of vaults, I'll be adding seconds to what otherwise could be a few milliseconds.
+// NOTE(@hadydotai): This looks kind of weird but it's intentally that way to avoid side stepping
+// the cache-line. We're not sharing ConstantProduct between go routines, each go routine potentially
+// running on a single core now owns a copy of the data it needs, not writing into a shared space.
+//
+// Unnecessary today, but sets us up for a better future. It's also a tiny change really.
+// Alternatively I would pad ConstantProduct for the L1 cache line, that's hairier than splitting
+// ownership and then rendezvous at a later point to collate the data.
+// It also consolidate the logic into a single closure, which means I can blow this up without
+// worrying about cache, or size. Batch pulling vault information maybe? At the moment we're dealing with
+// one hard coded pool with a pair of vaults.
 // TODO(@hadydotai): Actually display in the output table which vault balance did we fail to fetch for and errored out
 func poolBalances(ctx context.Context, client *rpc.Client, cp *ConstantProduct) error {
+	queries := []solana.PublicKey{
+		cp.Token0Vault,
+		cp.Token1Vault,
+	}
+	results := make([]*big.Int, len(queries))
+
 	errg, ctx := errgroup.WithContext(ctx)
-	errg.Go(func() error {
-		resp, err := client.GetTokenAccountBalance(ctx, cp.Token0Vault, rpc.CommitmentFinalized)
-		if err != nil {
-			return err
-		}
-		if resp == nil {
-			// NOTE(@hadydotai): To the naked eye, it seems unlikely that if we don't have an error then we must
-			// have this, well, no. resp is a pointer, defend against the Martians attack and their null pointy fingers.
-			// Anytime a pointer presents itself, it's subject to faulty memory. Best we can hope for here is a nil check.
-			return errors.New("rpc call getTokenAccountBalance failed, returning empty response")
-		}
-		if resp.Value == nil {
-			// NOTE(@hadydotai): Really unsure about this, need to find some failure cases. Is it even possible
-			// for a pool to drain completely on Raydium, if so what would that look like at this point here.
-			// If not, what could land me here then, parsing error? error on the wire? I don't know. Maybe it's okay
-			// to have no value and report a 0 balance. For now we'll error and gracefully show it to the user.
-			return errors.New("rpc call getTokenAccountBalance failed, returned no balance")
-		}
-		cp.Token0Amount.SetString(resp.Value.Amount, 10)
-		return nil
-	})
-	errg.Go(func() error {
-		resp, err := client.GetTokenAccountBalance(ctx, cp.Token1Vault, rpc.CommitmentFinalized)
-		if err != nil {
-			return err
-		}
-		cp.Token1Amount.SetString(resp.Value.Amount, 10)
-		return nil
-	})
+	for i := range queries {
+		i, vault := i, &queries[i] // NOTE(@hadydotai): order matters here, https://go.dev/ref/spec#For_clause
+		errg.Go(func() error {
+			resp, err := client.GetTokenAccountBalance(ctx, *vault, rpc.CommitmentFinalized)
+			if err != nil {
+				return err
+			}
+			if resp == nil {
+				// NOTE(@hadydotai): To the naked eye, it seems unlikely that if we don't have an error then we must
+				// have this, well, no. resp is a pointer, defend against the Martians attack and their null pointy fingers.
+				// Anytime a pointer presents itself, it's subject to faulty memory. Best we can hope for here is a nil check.
+				return fmt.Errorf("vault-%d rpc call getTokenAccountBalance failed, returning empty response", i)
+			}
+			if resp.Value == nil {
+				// NOTE(@hadydotai): Really unsure about this, need to find some failure cases. Is it even possible
+				// for a pool to drain completely on Raydium, if so what would that look like at this point here.
+				// If not, what could land me here then, parsing error? error on the wire? I don't know. Maybe it's okay
+				// to have no value and report a 0 balance. For now we'll error and gracefully show it to the user.
+				return fmt.Errorf("vault-%d rpc call getTokenAccountBalance failed, returned no balance", i)
+			}
+			amount, ok := new(big.Int).SetString(resp.Value.Amount, 10)
+			if !ok {
+				return fmt.Errorf("vault-%d balance is an invalid amount %q", i, resp.Value.Amount)
+			}
+			results[i] = amount
+			return nil
+		})
+	}
 	if err := errg.Wait(); err != nil {
 		return err
 	}
+	cp.Token0Amount = *results[0]
+	cp.Token1Amount = *results[1]
 	return nil
 }
 
