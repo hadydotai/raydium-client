@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"math/big"
 	"os"
-
-	"golang.org/x/sync/errgroup"
+	"sync"
 
 	"hadydotai/raydium-client/raydium_cp_swap"
 
@@ -26,12 +26,15 @@ var (
 	CPMMProgramPubK = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
 )
 
-type ConstantProduct struct {
-	Token0Vault  solana.PublicKey
-	Token0Amount big.Int
 
-	Token1Vault  solana.PublicKey
-	Token1Amount big.Int
+// mapPtrSliceRetAny maps over a slice of pointers, passing each element to a projection function to pick any value out
+// and collect that back into a new slice.
+func mapPtrSliceRetAny[Slice ~[]*Elm, Elm any](s Slice, m func(elm *Elm) any) []any {
+	mapped := []any{}
+	for _, elm := range s {
+		mapped = append(mapped, m(elm))
+	}
+	return mapped
 }
 
 func humanAmount(raw *big.Int, decimals uint8, precision int) string {
@@ -43,59 +46,58 @@ func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	return rat.FloatString(precision)
 }
 
-// NOTE(@hadydotai): This looks kind of weird but it's intentally that way to avoid side stepping
-// the cache-line. We're not sharing ConstantProduct between go routines, each go routine potentially
-// running on a single core now owns a copy of the data it needs, not writing into a shared space.
-//
-// Unnecessary today, but sets us up for a better future. It's also a tiny change really.
-// Alternatively I would pad ConstantProduct for the L1 cache line, that's hairier than splitting
-// ownership and then rendezvous at a later point to collate the data.
-// It also consolidate the logic into a single closure, which means I can blow this up without
-// worrying about cache, or size. Batch pulling vault information maybe? At the moment we're dealing with
-// one hard coded pool with a pair of vaults.
-// TODO(@hadydotai): Actually display in the output table which vault balance did we fail to fetch for and errored out
-func poolBalances(ctx context.Context, client *rpc.Client, cp *ConstantProduct) error {
-	queries := []solana.PublicKey{
-		cp.Token0Vault,
-		cp.Token1Vault,
-	}
-	results := make([]*big.Int, len(queries))
+type poolBalance struct {
+	Balance  *big.Int
+	Decimals uint8
+}
 
-	errg, ctx := errgroup.WithContext(ctx)
-	for i := range queries {
-		i, vault := i, &queries[i] // NOTE(@hadydotai): order matters here, https://go.dev/ref/spec#For_clause
-		errg.Go(func() error {
+// poolBalances will fetch balances from all vaults concurrently or in parallel depending on how you configure Go exec,
+// it's also cpu cache friendly. We don#t side step the cache line, each Go routine owns and mutates its own data, no
+// shared data contention resulting in cache evictions
+//
+// Returns two equal length slices (equals len(vaults)), balances and errors, so they can be indexed over in tandem.
+func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.PublicKey) ([]*poolBalance, []error) {
+	results := make([]*poolBalance, len(vaults))
+	errs := make([]error, len(vaults))
+	wg := sync.WaitGroup{}
+	for i := range vaults {
+		i, vault := i, &vaults[i] // NOTE(@hadydotai): order matters here, https://go.dev/ref/spec#For_clause
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			resp, err := client.GetTokenAccountBalance(ctx, *vault, rpc.CommitmentFinalized)
 			if err != nil {
-				return err
+				errs[i] = fmt.Errorf("rpc call getTokenAccountBalance failed: %w", err)
+				return
 			}
 			if resp == nil {
-				// NOTE(@hadydotai): To the naked eye, it seems unlikely that if we don't have an error then we must
-				// have this, well, no. resp is a pointer, defend against the Martians attack and their null pointy fingers.
-				// Anytime a pointer presents itself, it's subject to faulty memory. Best we can hope for here is a nil check.
-				return fmt.Errorf("vault-%d rpc call getTokenAccountBalance failed, returning empty response", i)
+				errs[i] = errors.New("rpc call getTokenAccountBalance failed, returning empty response")
+				return
 			}
+
 			if resp.Value == nil {
 				// NOTE(@hadydotai): Really unsure about this, need to find some failure cases. Is it even possible
 				// for a pool to drain completely on Raydium, if so what would that look like at this point here.
 				// If not, what could land me here then, parsing error? error on the wire? I don't know. Maybe it's okay
 				// to have no value and report a 0 balance. For now we'll error and gracefully show it to the user.
-				return fmt.Errorf("vault-%d rpc call getTokenAccountBalance failed, returned no balance", i)
+				errs[i] = errors.New("rpc call getTokenAccountBalance failed, returned no balance")
+				return
 			}
 			amount, ok := new(big.Int).SetString(resp.Value.Amount, 10)
 			if !ok {
-				return fmt.Errorf("vault-%d balance is an invalid amount %q", i, resp.Value.Amount)
+				errs[i] = fmt.Errorf("balance is an invalid amount %q", resp.Value.Amount)
+				return
 			}
-			results[i] = amount
-			return nil
-		})
+			results[i] = &poolBalance{
+				Balance:  amount,
+				Decimals: resp.Value.Decimals,
+			}
+		}()
 	}
-	if err := errg.Wait(); err != nil {
-		return err
+	wg.Wait()
+	return results, errs
+}
 	}
-	cp.Token0Amount = *results[0]
-	cp.Token1Amount = *results[1]
-	return nil
 }
 
 func main() {
@@ -125,26 +127,30 @@ func main() {
 		log.Fatalf("parsing PoolState failed, make sure the pool address you passed is a Raydium CP-Swap/CPMM pool: %s\n", err)
 	}
 
-	cp := ConstantProduct{
-		Token0Vault: pool.Token0Vault,
-		Token1Vault: pool.Token1Vault,
-	}
-
-	poolBalances(ctx, client, &cp)
-
 	t := table.NewWriter()
 	t.SetOutputMirror(os.Stdout)
 	t.SetTitle(*poolAddr)
 	t.SetCaption("CPMM/CP-Swap Raydium Pool")
 	t.AppendHeader(table.Row{"", "Token 0", "Token 1"})
 	t.AppendRow(table.Row{"Addr", pool.Token0Mint.String(), pool.Token1Mint.String()})
-	t.AppendRow(table.Row{"Decimals", pool.Mint0Decimals, pool.Mint1Decimals})
-	t.AppendRow(table.Row{
-		"Value",
-		// Token0
-		humanAmount(&cp.Token0Amount, pool.Mint0Decimals, int(pool.Mint0Decimals)),
-		// Token1
-		humanAmount(&cp.Token1Amount, pool.Mint1Decimals, int(pool.Mint1Decimals)),
-	})
+
+	balances, errs := poolBalances(ctx, client, []solana.PublicKey{pool.Token0Vault, pool.Token1Vault})
+	balancesDisplay := make([]any, len(balances)+1)
+	balancesDisplay[0] = "Balances"
+	for i := range balances {
+		if errs[i] != nil {
+			balancesDisplay[i+1] = err
+			continue
+		}
+		balancesDisplay[i+1] = humanAmount(balances[i].Balance, balances[i].Decimals, int(balances[i].Decimals))
+	}
+	t.AppendRow(balancesDisplay)
+
+	// NOTE(@hadydotai): Here's a little false-positive quirk with static analysis, uncomment the next line
+	// and change the decl+assign operator `:=` before the append to `=`, reassigning decimals. Can you figure out why
+	// go-static analysis complains about this? Hint: SSA.
+	// decimals := make([]any, len(balances)+1)
+	decimals := append([]any{"Decimals"}, mapPtrSliceRetAny(balances, func(elm *poolBalance) any { return elm.Decimals })...)
+	t.AppendRow(decimals)
 	t.Render()
 }
