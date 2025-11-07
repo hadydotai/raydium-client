@@ -97,7 +97,107 @@ func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.Publi
 	wg.Wait()
 	return results, errs
 }
+
+type constantProduct struct {
+	TokenInReserve  *poolBalance
+	TokenOutReserve *poolBalance
+}
+
+// QuoteOut takes an amount in TokenIn and will produce an amount in TokenOut: amountIn -> amountOut
+func (cp constantProduct) QuoteOut(amountIn *big.Int) *big.Int {
+	// Some defensive house keeping. Go, you're killing me.
+	if amountIn == nil {
+		return nil
 	}
+	if amountIn.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	if cp.TokenInReserve == nil || cp.TokenOutReserve == nil {
+		return nil
+	}
+	if cp.TokenInReserve.Balance == nil || cp.TokenOutReserve.Balance == nil {
+		return nil
+	}
+	if cp.TokenInReserve.Balance.Sign() <= 0 || cp.TokenOutReserve.Balance.Sign() <= 0 {
+		return nil
+	}
+
+	// X, Y initial reserves
+	// pre-swap:  	K = X*Y
+	// post-swap: 	K = (X + dX) * (Y - dY)
+	// 				X * Y = (X + dX) * (Y - dY)
+	//						^
+	//						|{updatedReserveIn}
+	// 					=> we need to isolate dY, so we'll divide by (X + dX) on both sides
+	//				(X * Y) / (X + dX) = ((X + dX) * (Y - dY)) / (X + dX)
+	//					=> (X + dX) rhs will cancel each other
+	//				(X * Y) / (X + dX) 	= (Y - dY)
+	//					{newReserveOut}
+	//					=> our target amountOut will be subtracting initial reserve from the new reserve
+	//				Y - {newReserveOut} = dY
+	//	science.
+	reserveIn, reserveOut := cp.TokenInReserve.Balance, cp.TokenOutReserve.Balance
+	constantProductK := new(big.Int).Mul(reserveIn, reserveOut)
+	updatedReserveIn := new(big.Int).Add(reserveIn, amountIn)
+	newReserveOut := new(big.Int).Quo(constantProductK, updatedReserveIn)
+	amountOut := new(big.Int).Sub(reserveOut, newReserveOut)
+	if amountOut.Sign() < 0 {
+		// NOTE(@hadydotai): we'd only end up here if we math our way into draining the pool on one side,
+		// I think this should be a flat out error and yell at the user for it, maybe?
+		return big.NewInt(0)
+	}
+	return amountOut
+}
+
+func (cp constantProduct) QuoteIn(amountOut *big.Int) *big.Int {
+	// Some defensive house keeping. Go, you're killing me, but a little reptition won't kill you.
+	if amountOut == nil {
+		return nil
+	}
+	if amountOut.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	if cp.TokenInReserve == nil || cp.TokenOutReserve == nil {
+		return nil
+	}
+	if cp.TokenInReserve.Balance == nil || cp.TokenOutReserve.Balance == nil {
+		return nil
+	}
+	if cp.TokenInReserve.Balance.Sign() <= 0 || cp.TokenOutReserve.Balance.Sign() <= 0 {
+		return nil
+	}
+	// X, Y initial reserves
+	// pre-swap:  	K = X*Y
+	// post-swap: 	K = (X + dX) * (Y - dY)
+	// 				X * Y = (X + dX) * (Y - dY)
+	//									^
+	//									|{updatedReserveOut}
+	// 					=> we need to isolate dX, so we'll divide by (Y - dY) on both sides
+	//				(X * Y) / (Y - dY) = ((X + dX) * (Y - dY)) / (Y - dY)
+	//					=> (Y - dY) rhs will cancel each other
+	//				(X * Y) / (Y - dY) 	= (X + dX)
+	//				~~~~~~~~~~~~~~~~~~
+	//				^
+	//				|{newReserveIn}
+	//					=> our target amountIn will
+	//				{newReserve} - X = dX
+	//	science.
+
+	reserveIn, reserveOut := cp.TokenInReserve.Balance, cp.TokenOutReserve.Balance
+	constantProductK := new(big.Int).Mul(reserveIn, reserveOut)
+
+	if amountOut.Cmp(reserveOut) >= 0 {
+		return nil
+	}
+	updatedReserveOut := new(big.Int).Sub(reserveIn, amountOut)
+	newReserveIn := new(big.Int).Quo(constantProductK, updatedReserveOut)
+	amountIn := new(big.Int).Sub(newReserveIn, reserveIn)
+	if amountIn.Sign() < 0 {
+		// NOTE(@hadydotai): we'd only end up here if we math our way into draining the pool on one side,
+		// I think this should be a flat out error and yell at the user for it, maybe?
+		return big.NewInt(0)
+	}
+	return amountOut
 }
 
 func main() {
