@@ -17,15 +17,56 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 )
 
+var CPMMProgramPubK = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
+
+// Addr represents an address on the blockchain, which can render nicely truncated in the middle with ellipsis.
+// This is my poor man's solution to fixing these long addresses until I figure out how to deal with and find ticker
+// symbols/token metadata on Solana
+type Addr string
+
+func (addr Addr) String() string {
+	const (
+		ellipsis = "…"
+		head     = 6
+		tail     = 6
+	)
+
+	rs := []rune(addr)
+	if len(rs) <= head+tail {
+		return string(addr)
+	}
+	return string(rs[:head]) + ellipsis + string(rs[len(rs)-tail:])
+}
+
 const (
-	wSOLMintAddr    = "So11111111111111111111111111111111111111112"
-	ourCorePoolAddr = "3ELLbDZkimZSpnWoWVAfDzeG24yi2LC4sB35ttfNCoEi"
+	wSOLMintAddr    Addr = "So11111111111111111111111111111111111111112"
+	ourCorePoolAddr Addr = "3ELLbDZkimZSpnWoWVAfDzeG24yi2LC4sB35ttfNCoEi"
+	feeRateDenom         = 1e6 // https://github.com/raydium-io/raydium-cp-swap/blob/master/programs/cp-swap/src/curve/fees.rs#L3
 )
 
-var (
-	CPMMProgramPubK = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
+type SwapDir uint8
+
+const (
+	SwapDirUnknown SwapDir = iota
+	SwapDirBuy
+	SwapDirSell
 )
 
+type Intent struct {
+	Direction SwapDir
+	CP        ConstantProduct
+}
+
+func verbToSwapDir(verb string) (SwapDir, error) {
+	switch verb {
+	case "pay", "sell", "swap":
+		return SwapDirBuy, nil
+	case "buy", "get":
+		return SwapDirSell, nil
+	default:
+		return SwapDirUnknown, fmt.Errorf("verb(%s) has no clear swap direction", verb)
+	}
+}
 
 // mapPtrSliceRetAny maps over a slice of pointers, passing each element to a projection function to pick any value out
 // and collect that back into a new slice.
@@ -46,18 +87,18 @@ func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	return rat.FloatString(precision)
 }
 
-type poolBalance struct {
+type PoolBalance struct {
 	Balance  *big.Int
 	Decimals uint8
 }
 
-// poolBalances will fetch balances from all vaults concurrently or in parallel depending on how you configure Go exec,
-// it's also cpu cache friendly. We don#t side step the cache line, each Go routine owns and mutates its own data, no
+// poolBalances will fetch balances from all vaults concurrently or in parallel depending on how you configure Go exec env,
+// it's also cpu cache friendly. We don't side step the cache line, each Go routine owns and mutates its own data, no
 // shared data contention resulting in cache evictions
 //
 // Returns two equal length slices (equals len(vaults)), balances and errors, so they can be indexed over in tandem.
-func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.PublicKey) ([]*poolBalance, []error) {
-	results := make([]*poolBalance, len(vaults))
+func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.PublicKey) ([]*PoolBalance, []error) {
+	results := make([]*PoolBalance, len(vaults))
 	errs := make([]error, len(vaults))
 	wg := sync.WaitGroup{}
 	for i := range vaults {
@@ -88,7 +129,7 @@ func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.Publi
 				errs[i] = fmt.Errorf("balance is an invalid amount %q", resp.Value.Amount)
 				return
 			}
-			results[i] = &poolBalance{
+			results[i] = &PoolBalance{
 				Balance:  amount,
 				Decimals: resp.Value.Decimals,
 			}
@@ -98,13 +139,13 @@ func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.Publi
 	return results, errs
 }
 
-type constantProduct struct {
-	TokenInReserve  *poolBalance
-	TokenOutReserve *poolBalance
+type ConstantProduct struct {
+	TokenInReserve  *PoolBalance
+	TokenOutReserve *PoolBalance
 }
 
 // QuoteOut takes an amount in TokenIn and will produce an amount in TokenOut: amountIn -> amountOut
-func (cp constantProduct) QuoteOut(amountIn *big.Int) *big.Int {
+func (cp ConstantProduct) QuoteOut(amountIn *big.Int) *big.Int {
 	// Some defensive house keeping. Go, you're killing me.
 	if amountIn == nil {
 		return nil
@@ -132,7 +173,9 @@ func (cp constantProduct) QuoteOut(amountIn *big.Int) *big.Int {
 	//				(X * Y) / (X + dX) = ((X + dX) * (Y - dY)) / (X + dX)
 	//					=> (X + dX) rhs will cancel each other
 	//				(X * Y) / (X + dX) 	= (Y - dY)
-	//					{newReserveOut}
+	//				~~~~~~~~~~~~~~~~~~
+	//				^
+	//				|{newReserveOut}
 	//					=> our target amountOut will be subtracting initial reserve from the new reserve
 	//				Y - {newReserveOut} = dY
 	//	science.
@@ -149,7 +192,7 @@ func (cp constantProduct) QuoteOut(amountIn *big.Int) *big.Int {
 	return amountOut
 }
 
-func (cp constantProduct) QuoteIn(amountOut *big.Int) *big.Int {
+func (cp ConstantProduct) QuoteIn(amountOut *big.Int) *big.Int {
 	// Some defensive house keeping. Go, you're killing me, but a little reptition won't kill you.
 	if amountOut == nil {
 		return nil
@@ -203,8 +246,9 @@ func (cp constantProduct) QuoteIn(amountOut *big.Int) *big.Int {
 func main() {
 	var (
 		rpcEP    = flag.String("rpc", rpc.MainNetBeta_RPC, "RPC to connect to")
-		poolAddr = flag.String("pool", ourCorePoolAddr, "Pool to interact with")
-		// mintAddr = flag.String("token", wSOLMintAddr, fmt.Sprintf("Token address to buy/sell, defaults to %s", wSOLMintAddr))
+		poolAddr = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
+		_        = flag.String("intent", "pay 100", "Intent and direction of the trade")
+		_        = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
 	)
 	flag.Parse()
 
@@ -250,7 +294,7 @@ func main() {
 	// and change the decl+assign operator `:=` before the append to `=`, reassigning decimals. Can you figure out why
 	// go-static analysis complains about this? Hint: SSA.
 	// decimals := make([]any, len(balances)+1)
-	decimals := append([]any{"Decimals"}, mapPtrSliceRetAny(balances, func(elm *poolBalance) any { return elm.Decimals })...)
+	decimals := append([]any{"Decimals"}, mapPtrSliceRetAny(balances, func(elm *PoolBalance) any { return elm.Decimals })...)
 	t.AppendRow(decimals)
 	t.Render()
 }
