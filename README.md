@@ -142,31 +142,26 @@ So, let's do it.
       there's anything special going on there. There's also a demo repo and
       apparently a nicely documented
       [CPI repo](https://github.com/raydium-io/raydium-cpi). Might prove useful.
-- [ ] With the quote determined, I make a trade. I have no idea how this will
-      work out, I've been looking over CP-Swap's source code and I see two swap
-      instructions, one `swap_base_input` and one `swap_base_output`. The what,
-      where, and why is unclear. I'll ask Preplexity for some pointers later.
-      There's enough examples of swap instructions though, an abundance really,
-      which is lovely.
-- [ ] Would be wonderful to pull in all the CP-Swap pools for a pair and filter
-      through that instead of providing the pool address directly.
+- [ ] Fees, fees, fees.
+- [ ] Make a trade. I have no idea how this will work out, I've been looking
+      over CP-Swap's source code and I see two swap instructions, one
+      `swap_base_input` and one `swap_base_output`. The what, where, and why is
+      unclear. I'll ask Preplexity for some pointers later. There's enough
+      examples of swap instructions though, an abundance really, which is
+      lovely.
+- [ ] Pull in all the CP-Swap pools for a pair and filter through that instead
+      of providing the pool address directly.
 - [ ] I'd like to deal with tickers instead of addresses, there doesn't seem to
       be a clear easy way to do so, but some references to metaplex here and
       there, after some digging, I landed on
       [a series of issues relevant to metadata](https://github.com/gagliardetto/solana-go/issues?q=is%3Aissue%20token%20metadata).
       Not sure if any would be useful but will cross that bridge when we get to
       it.
-- [ ] TUIs are cool, maybe I can cook something to list the pools, details about
-      them, filter on base/quote tokens, and trigger a few transactions from
-      there.
-- [ ] I can already see calls like `getProgramAccounts` being a problem, at this
-      point I need to think long term. Listening to a live stream of changes
-      seems to be native to Solana, that's wonderful, I'd hate to reinvoke gPA
-      all the time so this will need to be cached, then I reckon some form of
-      live indexing would be needed. I'll have to do some math here, figure out
-      the size of Pools on Raydium, because this could be anywhere in the order
-      of Gigabytes to mere megabytes, if I were to siphon the entire dataset and
-      cache it. Another bridge we'll cross when, and if we get there.
+- [ ] Trading REPL
+- [ ] I can already see calls like `getProgramAccounts` being a problem, can I
+      cache it? When do I invalidate the cache? I think I can update it with a
+      diff if I calculate the offset at which I last cached. Some bit math for a
+      fun afternoon.
 
 ## Sources
 
