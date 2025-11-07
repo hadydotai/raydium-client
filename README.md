@@ -137,48 +137,11 @@ So, let's do it.
       But we'll just generate it.
 - [x] Then I reckon I want to fetch details about my pool. Seems fitting because
       I know what to expect, we'll do just that.
-- [ ] If fetching details about my pool isn't a problem, we'll start thinking
-      about quotes. Constant product quotes are pretty straight forward. So I'll
-      math it out. Will also look into the
-      [SDK](https://github.com/raydium-io/raydium-sdk-V2) and see if there's
-      anything special going on there. There's also a demo repo and apparently a
-      nicely documented [CPI repo](https://github.com/raydium-io/raydium-cpi).
-      Might prove useful.
-
-<details>
-<summary>quoting</summary>
-
-So the math isn't fundamentally complex, constant product AMMs essentially
-define a price relation between `Token0` and `Token1` as `P = Token0 * Token1`.
-Which is the amount the LP is holding of `Token0` and `Token1`.
-
-If we're swapping, we need to determine the direction. Buying `Token0`
-essentially means we're adding `Token1` to get `Token0`. Selling `Token0` means
-the opposite, Adding `Token0` to get `Token1`. This changes the equation to this
-
-Buying `Token0`, we remove `Token0`, we add `Token1`
-
-```
-amRemove = amountof(Token0)
-amAdd = amountof(Token1)
-
-P = (Token0 - amRemove) * (Token1 + amAdd)
-```
-
-At this point, we know what we're willing to pay, we're paying (adding)
-`Token1`, to buy (remove) `Token0`. So out of amRemove and `amAdd`, we only know
-the added part. Rearranging the equation to solve for `amRemove`
-
-```
-amRemove = (Token0 * amAdd) / (Token1 + amAdd)
-```
-
-This doesn't factor fees, for now we'll ignore that.
-
-</details>
-
-<br />
-
+- [x] Quoting math without fees, explain the math in the code. Will also look
+      into the [SDK](https://github.com/raydium-io/raydium-sdk-V2) and see if
+      there's anything special going on there. There's also a demo repo and
+      apparently a nicely documented
+      [CPI repo](https://github.com/raydium-io/raydium-cpi). Might prove useful.
 - [ ] With the quote determined, I make a trade. I have no idea how this will
       work out, I've been looking over CP-Swap's source code and I see two swap
       instructions, one `swap_base_input` and one `swap_base_output`. The what,
