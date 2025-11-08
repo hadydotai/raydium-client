@@ -63,6 +63,10 @@ func mapPtrSliceRetAny[Slice ~[]*Elm, Elm any](s Slice, m func(elm *Elm) any) []
 	return mapped
 }
 
+func fixedPointScale(decimals uint8) *big.Int {
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+}
+
 func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	if raw == nil {
 		return "0"
@@ -72,8 +76,20 @@ func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	return rat.FloatString(precision)
 }
 
-func fixedPointScale(decimals uint8) *big.Int {
-	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+func humanToFixed(amountStr string, decimals uint8) (*big.Int, error) {
+	rat, ok := new(big.Rat).SetString(amountStr)
+	if !ok {
+		return nil, fmt.Errorf("the amount provided is an invalid decimal number: %q", amountStr)
+	}
+	if rat.Sign() <= 0 {
+		return nil, errors.New("amount must be greater than zero")
+	}
+	scale := fixedPointScale(decimals)
+	rat.Mul(rat, new(big.Rat).SetInt(scale))
+	if !rat.IsInt() {
+		return nil, fmt.Errorf("amount %s exceeds decimal precision of %d", amountStr, decimals)
+	}
+	return new(big.Int).Set(rat.Num()), nil
 }
 
 type PoolBalance struct {
@@ -84,7 +100,6 @@ type PoolBalance struct {
 type IntentInstruction struct {
 	Verb      string
 	AmountStr string
-	Amount    *big.Int
 	Dir       SwapDir
 }
 
@@ -143,22 +158,19 @@ type ConstantProduct struct {
 // QuoteOut takes an amount in TokenIn and will produce an amount in TokenOut: amountIn -> amountOut
 // In layman's terms, this figures out how much we get out of the pool, provided the amount we put into the pool.
 // All amounts are in their respective tokens of course
-func (cp ConstantProduct) QuoteOut(amountIn *big.Int) *big.Int {
+func (cp ConstantProduct) QuoteOut(amountIn *big.Int) (*big.Int, error) {
 	// Some defensive house keeping. Go, you're killing me.
-	if amountIn == nil {
-		return nil
-	}
-	if amountIn.Sign() <= 0 {
-		return big.NewInt(0)
+	if amountIn == nil || amountIn.Sign() <= 0 {
+		return nil, errors.New("amount in must be greater than zero")
 	}
 	if cp.TokenInReserve == nil || cp.TokenOutReserve == nil {
-		return nil
+		return nil, errors.New("pool reserves unavailable for quote out")
 	}
 	if cp.TokenInReserve.Balance == nil || cp.TokenOutReserve.Balance == nil {
-		return nil
+		return nil, errors.New("pool balances unavailable for quote out")
 	}
 	if cp.TokenInReserve.Balance.Sign() <= 0 || cp.TokenOutReserve.Balance.Sign() <= 0 {
-		return nil
+		return nil, errors.New("pool reserves must be greater than zero for quote out")
 	}
 
 	// X, Y initial reserves
@@ -182,33 +194,30 @@ func (cp ConstantProduct) QuoteOut(amountIn *big.Int) *big.Int {
 	updatedReserveIn := new(big.Int).Add(reserveIn, amountIn)
 	newReserveOut := new(big.Int).Quo(constantProductK, updatedReserveIn)
 	amountOut := new(big.Int).Sub(reserveOut, newReserveOut)
-	if amountOut.Sign() < 0 {
+	if amountOut.Sign() <= 0 {
 		// NOTE(@hadydotai): we'd only end up here if we math our way into draining the pool on one side,
 		// I think this should be a flat out error and yell at the user for it, maybe?
-		return big.NewInt(0)
+		return nil, errors.New("trade would not yield a positive output amount")
 	}
-	return amountOut
+	return amountOut, nil
 }
 
 // QuoteIn takes an amount in TokenOut and will produce an amount in TokenIn: amountOut -> amountIn
 // In layman's terms, this figures out how much we need to give, to match the amount we want out of the pool.
 // All amounts are in their respective tokens of course
-func (cp ConstantProduct) QuoteIn(amountOut *big.Int) *big.Int {
+func (cp ConstantProduct) QuoteIn(amountOut *big.Int) (*big.Int, error) {
 	// Some defensive house keeping. Go, you're killing me, but a little reptition won't kill you.
-	if amountOut == nil {
-		return nil
-	}
-	if amountOut.Sign() <= 0 {
-		return big.NewInt(0)
+	if amountOut == nil || amountOut.Sign() <= 0 {
+		return nil, errors.New("amount out must be greater than zero")
 	}
 	if cp.TokenInReserve == nil || cp.TokenOutReserve == nil {
-		return nil
+		return nil, errors.New("pool reserves unavailable for quote in")
 	}
 	if cp.TokenInReserve.Balance == nil || cp.TokenOutReserve.Balance == nil {
-		return nil
+		return nil, errors.New("pool balances unavailable for quote in")
 	}
 	if cp.TokenInReserve.Balance.Sign() <= 0 || cp.TokenOutReserve.Balance.Sign() <= 0 {
-		return nil
+		return nil, errors.New("pool reserves must be greater than zero for quote in")
 	}
 	// X, Y initial reserves
 	// pre-swap:  	K = X*Y
@@ -231,17 +240,19 @@ func (cp ConstantProduct) QuoteIn(amountOut *big.Int) *big.Int {
 	constantProductK := new(big.Int).Mul(reserveIn, reserveOut)
 
 	if amountOut.Cmp(reserveOut) >= 0 {
-		return nil
+		requested := humanAmount(amountOut, cp.TokenOutReserve.Decimals, int(cp.TokenOutReserve.Decimals))
+		available := humanAmount(reserveOut, cp.TokenOutReserve.Decimals, int(cp.TokenOutReserve.Decimals))
+		return nil, fmt.Errorf("requested %s exceeds available %s liquidity", requested, available)
 	}
-	updatedReserveOut := new(big.Int).Sub(reserveIn, amountOut)
+	updatedReserveOut := new(big.Int).Sub(reserveOut, amountOut)
 	newReserveIn := new(big.Int).Quo(constantProductK, updatedReserveOut)
 	amountIn := new(big.Int).Sub(newReserveIn, reserveIn)
-	if amountIn.Sign() < 0 {
+	if amountIn.Sign() <= 0 {
 		// NOTE(@hadydotai): we'd only end up here if we math our way into draining the pool on one side,
 		// I think this should be a flat out error and yell at the user for it, maybe?
-		return big.NewInt(0)
+		return nil, errors.New("trade would not require a positive input amount")
 	}
-	return amountIn
+	return amountIn, nil
 }
 
 func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*big.Int, *IntentInstruction, error) {
@@ -249,40 +260,62 @@ func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.Pool
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(balances) > 2 {
+	if len(balances) != 2 {
 		// NOTE(@hadydotai): Who's fault is this actually? Mine or the users? Possible location for a panic here as
 		// I don't think we should actually be here at all.
-		return nil, nil, errors.New("intents are handled per pool which is a pair of tokens, we're receiving more than 2 balances")
+		return nil, instruction, fmt.Errorf("intents are handled per pool which is a pair of tokens, expected 2 balances, got %d", len(balances))
 	}
-	knownAmount := new(big.Int).Set(instruction.Amount)
-	unknownAmount := new(big.Int)
+	for i, bal := range balances {
+		if bal == nil || bal.Balance == nil {
+			return nil, instruction, fmt.Errorf("missing balance information for token index %d", i)
+		}
+	}
+	var knownAmount *big.Int
+	var quote *big.Int
 
 	switch instruction.Dir {
 	case SwapDirBuy:
 		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
-			// we're going to adjust the known amount to a fixed-point number for our quote calculations
-			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[0].Decimals))
+			knownAmount, err = humanToFixed(instruction.AmountStr, balances[0].Decimals)
+			if err != nil {
+				return nil, instruction, err
+			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
 		} else {
-			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[1].Decimals))
+			knownAmount, err = humanToFixed(instruction.AmountStr, balances[1].Decimals)
+			if err != nil {
+				return nil, instruction, err
+			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
 		}
-		unknownAmount = cp.QuoteIn(knownAmount)
+		quote, err = cp.QuoteIn(knownAmount)
+		if err != nil {
+			return nil, instruction, err
+		}
 	case SwapDirSell:
 		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
-			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[1].Decimals))
+			knownAmount, err = humanToFixed(instruction.AmountStr, balances[0].Decimals)
+			if err != nil {
+				return nil, instruction, err
+			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
 		} else {
-			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[0].Decimals))
+			knownAmount, err = humanToFixed(instruction.AmountStr, balances[1].Decimals)
+			if err != nil {
+				return nil, instruction, err
+			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
 		}
-		unknownAmount = cp.QuoteOut(knownAmount)
+		quote, err = cp.QuoteOut(knownAmount)
+		if err != nil {
+			return nil, instruction, err
+		}
 
 	default: // SwapDirUnknown
 		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
 	}
 
-	return unknownAmount, instruction, nil
+	return quote, instruction, nil
 }
 
 func parseIntent(intentLine string) (*IntentInstruction, error) {
@@ -292,10 +325,6 @@ func parseIntent(intentLine string) (*IntentInstruction, error) {
 	}
 	verb := intentParts[0]
 	knownAmountStr := intentParts[1]
-	knownAmount, ok := new(big.Int).SetString(knownAmountStr, 10)
-	if !ok {
-		return nil, fmt.Errorf("the amount provided is an invalid decimal number: %q", knownAmountStr)
-	}
 	dir, err := verbToSwapDir(verb)
 	if err != nil {
 		return nil, err
@@ -303,7 +332,6 @@ func parseIntent(intentLine string) (*IntentInstruction, error) {
 	return &IntentInstruction{
 		Verb:      verb,
 		AmountStr: knownAmountStr,
-		Amount:    knownAmount,
 		Dir:       dir,
 	}, nil
 }
@@ -375,10 +403,7 @@ func main() {
 
 	targetAddr := Addr(*tokenAddr)
 	cp := ConstantProduct{}
-	unknownAmount, intentMeta, err := cp.DoIntent(*intentLine, pool, targetAddr, balances...)
-	if err != nil {
-		log.Fatalf("intent execution failed: %s\n", err)
-	}
+	unknownAmount, intentMeta, intentErr := cp.DoIntent(*intentLine, pool, targetAddr, balances...)
 	intentRow := table.Row{"Intent", "", ""}
 	targetIdx := 0
 	if targetAddr == Addr(pool.Token1Mint.String()) {
@@ -386,13 +411,23 @@ func main() {
 	}
 	counterIdx := 1 - targetIdx
 
+	if intentErr != nil {
+		errMsg := fmt.Sprintf("intent failed: %s", intentErr)
+		if intentMeta != nil {
+			errMsg = fmt.Sprintf("%s %s failed: %s", intentMeta.Verb, intentMeta.AmountStr, intentErr)
+		}
+		intentRow[targetIdx+1] = errMsg
+		intentRow[counterIdx+1] = errMsg
+		t.AppendRow(intentRow)
+		t.Render()
+		return
+	}
+
 	var counterDecimals uint8
-	_ = counterDecimals
 	if counterIdx < len(balances) && balances[counterIdx] != nil {
 		counterDecimals = balances[counterIdx].Decimals
 	}
-	// counterAmount := humanAmount(unknownAmount, counterDecimals, int(counterDecimals))
-	counterAmount := unknownAmount
+	counterAmount := humanAmount(unknownAmount, counterDecimals, int(counterDecimals))
 	intentText := fmt.Sprintf("%s %s", intentMeta.Verb, intentMeta.AmountStr)
 
 	switch intentMeta.Dir {
@@ -403,7 +438,7 @@ func main() {
 		intentRow[targetIdx+1] = intentText
 		intentRow[counterIdx+1] = fmt.Sprintf("paying %s", counterAmount)
 	default: // SwapDirUnknown
-		panic("we really shouldn't be here, did we forget to handle the error returned from verbToSwapDir?")
+		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
 	}
 	t.AppendRow(intentRow)
 	t.Render()
