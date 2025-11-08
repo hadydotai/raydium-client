@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strings"
 	"sync"
 
@@ -14,16 +15,17 @@ import (
 
 	solana "github.com/gagliardetto/solana-go"
 	atapkg "github.com/gagliardetto/solana-go/programs/associated-token-account"
+	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
 var (
-	CPMMProgramPubK     = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
-	ATAProgramID        = atapkg.ProgramID
-	SystemProgramID     = system.ProgramID
-	DefaultUnitLimit    = uint32(200_000_000) // rough ballpark, https://solana.com/docs/core/fees and from simulating a few transactions
-	DefaultUnitPriceMic = uint64(5000)        // micro-lamports, 0.005 lamports
+	CPMMProgramPubK  = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
+	ATAProgramID     = atapkg.ProgramID
+	SystemProgramID  = system.ProgramID
+	DefaultUnitLimit = uint32(200_000_000) // rough ballpark, https://solana.com/docs/core/fees and from simulating a few transactions
+	DefaultUnitPrice = uint64(5000)        // micro-lamports, 0.005 lamports
 	//TODO(@hadydotai): Figure out how to give the user the ability to adjust priority fees
 )
 
@@ -110,6 +112,26 @@ type IntentInstruction struct {
 	Verb      string
 	AmountStr string
 	Dir       SwapDir
+
+	// NOTE(@hadydotai):CLEAN: Everything we'll need for building a transaction sits here, I'd like to think of
+	// something better than this but for now, it'll do fine.
+	// The general issue is, not until we've worked out the intent, we have no clue which token is In and
+	// Out of the pair of tokens we're looking at in a pool. By the time we're able to provide an amount resolving
+	// for an In or an Out, we already have everything we actually need, which vault is In, which is Out, what the mint
+	// addresses are, ...etc. Perhaps it's par for the course, and it's okay to keep it here.
+	// -- EDIT+1: A random thought, perhaps I can build the transaction and store it here. I don't actually need anything
+	// 	outside of DoIntent.
+	Amount          *big.Int
+	TokenInMint     solana.PublicKey
+	TokenOutMint    solana.PublicKey
+	TokenInVault    solana.PublicKey
+	TokenOutVault   solana.PublicKey
+	TokenInProgram  solana.PublicKey
+	TokenOutProgram solana.PublicKey
+}
+
+func (ii *IntentInstruction) String() string {
+	return fmt.Sprintf("%s %s", ii.Verb, ii.AmountStr)
 }
 
 // poolBalances will fetch balances from all vaults concurrently or in parallel depending on how you configure Go exec env,
@@ -330,67 +352,83 @@ func (cp ConstantProduct) QuoteIn(amountOut *big.Int) (*big.Int, error) {
 	return grossAmountIn, nil
 }
 
-func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*big.Int, *IntentInstruction, error) {
+func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*IntentInstruction, error) {
 	instruction, err := parseIntent(intentLine)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if len(balances) != 2 {
 		// NOTE(@hadydotai): Who's fault is this actually? Mine or the users? Possible location for a panic here as
 		// I don't think we should actually be here at all.
-		return nil, instruction, fmt.Errorf("intents are handled per pool which is a pair of tokens, expected 2 balances, got %d", len(balances))
+		return instruction, fmt.Errorf("intents are handled per pool which is a pair of tokens, expected 2 balances, got %d", len(balances))
 	}
 	for i, bal := range balances {
 		if bal == nil || bal.Balance == nil {
-			return nil, instruction, fmt.Errorf("missing balance information for token index %d", i)
+			return instruction, fmt.Errorf("missing balance information for token index %d", i)
 		}
 	}
-	var knownAmount *big.Int
-	var quote *big.Int
+	var (
+		knownAmount *big.Int
+		quote       *big.Int
+	)
 
+	// and now for the tricky bit https://youtu.be/lKXe3HUG2l4?si=Tb6V5Pe0k9nKzcBh&t=628
 	switch instruction.Dir {
 	case SwapDirBuy:
 		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[0].Decimals)
 			if err != nil {
-				return nil, instruction, err
+				return instruction, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
+			instruction.TokenInMint, instruction.TokenOutMint = pool.Token1Mint, pool.Token0Mint
+			instruction.TokenInVault, instruction.TokenOutVault = pool.Token1Vault, pool.Token0Vault
+			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token1Program, pool.Token0Program
 		} else {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[1].Decimals)
 			if err != nil {
-				return nil, instruction, err
+				return instruction, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
+			instruction.TokenInMint, instruction.TokenOutMint = pool.Token0Mint, pool.Token1Mint
+			instruction.TokenInVault, instruction.TokenOutVault = pool.Token0Vault, pool.Token1Vault
+			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token0Program, pool.Token1Program
 		}
 		quote, err = cp.QuoteIn(knownAmount)
 		if err != nil {
-			return nil, instruction, err
+			return instruction, err
 		}
 	case SwapDirSell:
 		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[0].Decimals)
 			if err != nil {
-				return nil, instruction, err
+				return instruction, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
+			instruction.TokenInMint, instruction.TokenOutMint = pool.Token0Mint, pool.Token1Mint
+			instruction.TokenInVault, instruction.TokenOutVault = pool.Token0Vault, pool.Token1Vault
+			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token0Program, pool.Token1Program
 		} else {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[1].Decimals)
 			if err != nil {
-				return nil, instruction, err
+				return instruction, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
+			instruction.TokenInMint, instruction.TokenOutMint = pool.Token1Mint, pool.Token0Mint
+			instruction.TokenInVault, instruction.TokenOutVault = pool.Token1Vault, pool.Token0Vault
+			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token1Program, pool.Token0Program
 		}
 		quote, err = cp.QuoteOut(knownAmount)
 		if err != nil {
-			return nil, instruction, err
+			return instruction, err
 		}
 
 	default: // SwapDirUnknown
 		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
 	}
 
-	return quote, instruction, nil
+	instruction.Amount = quote
+	return instruction, nil
 }
 
 func parseIntent(intentLine string) (*IntentInstruction, error) {
@@ -422,6 +460,30 @@ func verbToSwapDir(verb string) (SwapDir, error) {
 	}
 }
 
+func makeATAIfMissing(ctx context.Context, c *rpc.Client, payer solana.PublicKey, owner solana.PublicKey, mint solana.PublicKey) (solana.PublicKey, []solana.Instruction, error) {
+	ata, _, err := solana.FindAssociatedTokenAddress(owner, mint)
+	if err != nil {
+		return solana.PublicKey{}, nil, err
+	}
+
+	// Check existence:
+	ai, err := c.GetAccountInfo(ctx, ata)
+	if err != nil {
+		return solana.PublicKey{}, nil, err
+	}
+
+	var ixs []solana.Instruction
+	if ai == nil {
+		ix := atapkg.NewCreateInstruction(
+			payer,
+			owner,
+			mint,
+		).Build()
+		ixs = append(ixs, ix)
+	}
+	return ata, ixs, nil
+}
+
 func main() {
 	var (
 		hotwalletPath = flag.String("hotwallet", "", "Path to the hotwallet to use for signing transactions")
@@ -440,7 +502,7 @@ func main() {
 
 	poolPubK, err := solana.PublicKeyFromBase58(*poolAddr)
 	if err != nil {
-		log.Fatalf("deriving public key from pool address (base58) failed, make sure it's b58 encoded: %s\n", err)
+		log.Fatalf("deriving public key from pool address (base58) failed, make sure it's base58 encoded: %s\n", err)
 	}
 
 	client := rpc.New(*rpcEP)
@@ -480,18 +542,92 @@ func main() {
 		poolAddress:   *poolAddr,
 	}
 	ui := newTermUI(builder)
-	decision, err := ui.Run(*intentLine)
+	intentMeta, err := ui.Run(*intentLine)
 	if err != nil {
 		log.Fatalf("interactive UI failed: %s\n", err)
 	}
-	switch decision {
-	case decisionProceed:
-		fmt.Println("Proceeding with the current intent (action not yet implemented).")
-	case decisionDecline:
-		fmt.Println("User chose not to proceed.")
-	case decisionAbort:
-		fmt.Println("Session aborted.")
-	default:
-		fmt.Println("Exited without an explicit decision.")
+	if intentMeta == nil { // user has chosen to reject or bailout
+		log.Println("Aborting...")
+		os.Exit(0)
 	}
+	// now we do the swap, finally.
+	payerPub := payer.PublicKey()
+	inATA, inATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenInMint)
+	if err != nil {
+		log.Fatalf("input ATA: %v", err)
+	}
+	outATA, outATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenOutMint)
+	if err != nil {
+		log.Fatalf("output ATA: %v", err)
+	}
+
+	auth, _, err := solana.FindProgramAddress(
+		[][]byte{[]byte("vault_and_lp_mint_auth_seed")}, // https://github.com/raydium-io/raydium-cp-swap/blob/master/programs/cp-swap/src/lib.rs#L43
+		CPMMProgramPubK,
+	)
+	if err != nil {
+		log.Fatalf("authority PDA: %v", err)
+	}
+	// TODO(@hadydotai): Here I need to check for the direction because the entire instruction will likely change, so I guess let's guard against it now
+	// and deal with it later.
+	if intentMeta.Dir != SwapDirSell {
+		log.Fatalln("unsupported direction, currently attempting a max out transaction (swap_base_output)")
+	}
+	amountInU64 := intentMeta.Amount.Uint64()
+	// minOutU64 := minOut.Uint64()
+	swapIx, err := raydium_cp_swap.NewSwapBaseInputInstruction(amountInU64, amountInU64,
+		solana.Meta(payerPub).WRITE().SIGNER().PublicKey,
+		solana.Meta(auth).PublicKey,
+		solana.Meta(pool.AmmConfig).PublicKey,
+		solana.Meta(poolPubK).WRITE().PublicKey,
+		solana.Meta(inATA).WRITE().PublicKey,
+		solana.Meta(outATA).WRITE().PublicKey,
+		solana.Meta(intentMeta.TokenInVault).WRITE().PublicKey,
+		solana.Meta(intentMeta.TokenOutVault).WRITE().PublicKey,
+		solana.Meta(intentMeta.TokenInProgram).PublicKey,
+		solana.Meta(intentMeta.TokenOutProgram).PublicKey,
+		solana.Meta(intentMeta.TokenInMint).PublicKey,
+		solana.Meta(intentMeta.TokenOutMint).PublicKey,
+		solana.Meta(pool.ObservationKey).WRITE().PublicKey,
+	)
+	if err != nil {
+		log.Fatalf("failed to build swap instruction: %s\n", err)
+	}
+
+	// NOTE(@hadydotai): I guess we don't need this, but maybe we can expose it to the user
+	cb1 := computebudget.NewSetComputeUnitLimitInstruction(uint32(DefaultUnitLimit)).Build()
+	cb2 := computebudget.NewSetComputeUnitPriceInstruction(DefaultUnitPrice).Build()
+
+	var ixs []solana.Instruction
+	ixs = append(ixs, cb1, cb2)
+	ixs = append(ixs, inATAixs...)
+	ixs = append(ixs, outATAixs...)
+	ixs = append(ixs, swapIx)
+
+	recent, err := client.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		log.Fatalf("blockhash: %v", err)
+	}
+	tx, err := solana.NewTransaction(
+		ixs,
+		recent.Value.Blockhash,
+		solana.TransactionPayer(payerPub),
+	)
+	if err != nil {
+		log.Fatalf("tx build: %v", err)
+	}
+	if _, err := tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(payerPub) {
+			return &payer
+		}
+		return nil
+	}); err != nil {
+		log.Fatalf("sign: %v", err)
+	}
+
+	sig, err := client.SendTransaction(ctx, tx)
+	if err != nil {
+		log.Fatalf("send: %v", err)
+	}
+	log.Println("Tx: ", sig.String())
 }

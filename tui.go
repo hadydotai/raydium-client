@@ -20,18 +20,18 @@ const (
 type userDecision uint8
 
 const (
-	decisionNone userDecision = iota
-	decisionProceed
-	decisionDecline
-	decisionAbort
+	userDecisionBailout userDecision = iota
+	userDecisionNOOP
+	userDecisionProceed
+	userDecisionReject
 )
 
 var spinnerFrames = []rune{'|', '/', '-', '\\'}
 
 type renderResult struct {
-	intent string
-	table  string
-	err    error
+	intentMeta *IntentInstruction
+	table      string
+	err        error
 }
 
 type termUI struct {
@@ -46,7 +46,7 @@ type termUI struct {
 	currentIntent   string
 	spinnerFrame    int
 	statusMessage   string
-	decision        userDecision
+	intentMeta      *IntentInstruction
 	cursorVisible   bool
 	tableFlashUntil time.Time
 }
@@ -60,9 +60,9 @@ func newTermUI(builder *TableBuilder) *termUI {
 	}
 }
 
-func (ui *termUI) Run(initialIntent string) (userDecision, error) {
+func (ui *termUI) Run(initialIntent string) (*IntentInstruction, error) {
 	if err := termbox.Init(); err != nil {
-		return decisionNone, err
+		return nil, err
 	}
 	defer termbox.Close()
 	defer close(ui.done)
@@ -82,18 +82,32 @@ func (ui *termUI) Run(initialIntent string) (userDecision, error) {
 		case ev := <-eventCh:
 			switch ev.Type {
 			case termbox.EventError:
-				return decisionNone, ev.Err
+				return nil, ev.Err
 			case termbox.EventResize:
 				continue
 			case termbox.EventKey:
-				if ui.handleKey(ev) {
-					return ui.decision, nil
+				if decision, ok := ui.handleKey(ev); ok {
+					switch decision {
+					case userDecisionNOOP:
+						// NOTE(@hadydotai): Yeah TUIs man. So okay, we can't be here. Period.
+						// while I guess it's harmless, it just shouldn't happen.
+						//
+						// userDecisionNOOP is a sentinel value, which means it needs to come with an ok == false. We also could technically
+						// do a `continue` here, which is exactly what we want really, but I'd rather not. Rather panic
+						// and fix the wrong semantic source than cover for it here defensively.
+						panic("we shouldn't be here, NOOP + true means something went wrong in handleKey")
+					case userDecisionReject, userDecisionBailout:
+						return nil, nil
+					default:
+						return ui.intentMeta, nil
+					}
 				}
 			}
 		case res := <-ui.resultCh:
 			ui.busy = false
 			ui.spinnerFrame = 0
-			ui.currentIntent = res.intent
+			ui.intentMeta = res.intentMeta
+			ui.currentIntent = res.intentMeta.String()
 			if res.err != nil {
 				ui.statusMessage = fmt.Sprintf("failed to compute intent: %v", res.err)
 				ui.mode = modeAwaitDecision
@@ -123,33 +137,29 @@ func (ui *termUI) startCompute(intent string) {
 	ui.spinnerFrame = 0
 	ui.statusMessage = ""
 	go func(intent string) {
-		tableStr, err := ui.builder.Build(intent)
+		tableStr, intentMeta, err := ui.builder.Build(intent)
 		select {
-		case ui.resultCh <- renderResult{intent: intent, table: tableStr, err: err}:
+		case ui.resultCh <- renderResult{intentMeta: intentMeta, table: tableStr, err: err}:
 		case <-ui.done:
 		}
 	}(intent)
 }
 
-func (ui *termUI) handleKey(ev termbox.Event) bool {
+func (ui *termUI) handleKey(ev termbox.Event) (userDecision, bool) {
 	if ev.Key == termbox.KeyCtrlC {
-		ui.decision = decisionAbort
-		return true
+		return userDecisionBailout, true
 	}
 	switch ui.mode {
 	case modeBusy:
 		if ev.Key == termbox.KeyEsc {
-			ui.decision = decisionAbort
-			return true
+			return userDecisionBailout, true
 		}
 	case modeAwaitDecision:
 		switch ev.Ch {
 		case 'y', 'Y':
-			ui.decision = decisionProceed
-			return true
+			return userDecisionProceed, true
 		case 'n', 'N':
-			ui.decision = decisionDecline
-			return true
+			return userDecisionReject, true
 		case 'c', 'C':
 			ui.mode = modePrompt
 			ui.promptBuffer = ui.promptBuffer[:0]
@@ -157,8 +167,7 @@ func (ui *termUI) handleKey(ev termbox.Event) bool {
 			ui.cursorVisible = true
 		}
 		if ev.Key == termbox.KeyEsc {
-			ui.decision = decisionDecline
-			return true
+			return userDecisionReject, true
 		}
 	case modePrompt:
 		switch ev.Key {
@@ -166,22 +175,22 @@ func (ui *termUI) handleKey(ev termbox.Event) bool {
 			intent := strings.TrimSpace(string(ui.promptBuffer))
 			if intent == "" {
 				ui.statusMessage = "Intent cannot be empty."
-				return false
+				return userDecisionNOOP, false
 			}
 			ui.promptBuffer = ui.promptBuffer[:0]
 			ui.startCompute(intent)
-			return false
+			return userDecisionNOOP, false
 		case termbox.KeyEsc:
 			ui.mode = modeAwaitDecision
 			ui.promptBuffer = ui.promptBuffer[:0]
 			ui.statusMessage = "Press y=yes, n=no, c=change."
 			ui.cursorVisible = true
-			return false
+			return userDecisionNOOP, false
 		case termbox.KeyBackspace, termbox.KeyBackspace2:
 			if len(ui.promptBuffer) > 0 {
 				ui.promptBuffer = ui.promptBuffer[:len(ui.promptBuffer)-1]
 			}
-			return false
+			return userDecisionNOOP, false
 		}
 		if ev.Ch != 0 {
 			ui.promptBuffer = append(ui.promptBuffer, ev.Ch)
@@ -189,7 +198,7 @@ func (ui *termUI) handleKey(ev termbox.Event) bool {
 			ui.promptBuffer = append(ui.promptBuffer, ' ')
 		}
 	}
-	return false
+	return userDecisionNOOP, false
 }
 
 func (ui *termUI) draw() {

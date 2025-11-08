@@ -21,13 +21,13 @@ type TableBuilder struct {
 	poolAddress   string
 }
 
-func (tb *TableBuilder) Build(intentLine string) (string, error) {
+func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, error) {
 	// TODO(@hadydotai):BUG: This is a problem, poolBalances always creates slices of an exact size, so len(balances) will
 	// actually never be zero, it's not a signal for errors. In fact, neither are, balances and errs have a length.
 	// They might be zeroed out, but they're preallocated and have a length.
 	balances, errs := poolBalances(tb.ctx, tb.client, []solana.PublicKey{tb.pool.Token0Vault, tb.pool.Token1Vault})
 	if len(balances) == 0 {
-		return "", errors.New("no balances available for pool")
+		return "", nil, errors.New("no balances available for pool")
 	}
 	builder := &strings.Builder{}
 	t := table.NewWriter()
@@ -66,7 +66,7 @@ func (tb *TableBuilder) Build(intentLine string) (string, error) {
 	t.AppendRow(table.Row{"Trade fee", tradeFeeRow, tradeFeeRow})
 
 	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate}
-	unknownAmount, intentMeta, intentErr := cp.DoIntent(intentLine, tb.pool, tb.targetAddr, balances...)
+	intentMeta, intentErr := cp.DoIntent(intentLine, tb.pool, tb.targetAddr, balances...)
 	intentRow := table.Row{"Intent", "", ""}
 	targetTokenCell := 0
 	if tb.targetAddr == Addr(tb.pool.Token1Mint.String()) {
@@ -83,14 +83,14 @@ func (tb *TableBuilder) Build(intentLine string) (string, error) {
 		intentRow[counterTokenCell+1] = errMsg
 		t.AppendRow(intentRow, table.RowConfig{AutoMerge: true})
 		t.Render()
-		return builder.String(), nil
+		return builder.String(), intentMeta, nil
 	}
 
 	var counterTokenDecimals uint8
 	if counterTokenCell < len(balances) && balances[counterTokenCell] != nil {
 		counterTokenDecimals = balances[counterTokenCell].Decimals
 	}
-	counterTokenAmount := humanAmount(unknownAmount, counterTokenDecimals, int(counterTokenDecimals))
+	counterTokenAmount := humanAmount(intentMeta.Amount, counterTokenDecimals, int(counterTokenDecimals))
 	intentText := fmt.Sprintf("%s %s", intentMeta.Verb, intentMeta.AmountStr)
 
 	switch intentMeta.Dir {
@@ -105,5 +105,5 @@ func (tb *TableBuilder) Build(intentLine string) (string, error) {
 	}
 	t.AppendRow(intentRow)
 	t.Render()
-	return builder.String(), nil
+	return builder.String(), intentMeta, nil
 }
