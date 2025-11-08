@@ -81,6 +81,13 @@ type PoolBalance struct {
 	Decimals uint8
 }
 
+type IntentInstruction struct {
+	Verb      string
+	AmountStr string
+	Amount    *big.Int
+	Dir       SwapDir
+}
+
 // poolBalances will fetch balances from all vaults concurrently or in parallel depending on how you configure Go exec env,
 // it's also cpu cache friendly. We don't side step the cache line, each Go routine owns and mutates its own data, no
 // shared data contention resulting in cache evictions
@@ -237,29 +244,20 @@ func (cp ConstantProduct) QuoteIn(amountOut *big.Int) *big.Int {
 	return amountIn
 }
 
-func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*big.Int, error) {
-	intentParts := strings.Fields(intentLine)
-	if len(intentParts) > 2 {
-		return nil, errors.New("intent instructions must be a <verb> <amount>, and one pair per line")
+func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*big.Int, *IntentInstruction, error) {
+	instruction, err := parseIntent(intentLine)
+	if err != nil {
+		return nil, nil, err
 	}
 	if len(balances) > 2 {
 		// NOTE(@hadydotai): Who's fault is this actually? Mine or the users? Possible location for a panic here as
 		// I don't think we should actually be here at all.
-		return nil, errors.New("intents are handled per pool which is a pair of tokens, we're receiving more than 2 balances")
+		return nil, nil, errors.New("intents are handled per pool which is a pair of tokens, we're receiving more than 2 balances")
 	}
-	verb := intentParts[0]
-	knownAmountStr := intentParts[1]
-	knownAmount, ok := new(big.Int).SetString(knownAmountStr, 10)
+	knownAmount := new(big.Int).Set(instruction.Amount)
 	unknownAmount := new(big.Int)
-	if !ok {
-		return nil, fmt.Errorf("the amount provided is an invalid decimal number: %q", knownAmountStr)
-	}
 
-	dir, err := verbToSwapDir(verb)
-	if err != nil {
-		return nil, err
-	}
-	switch dir {
+	switch instruction.Dir {
 	case SwapDirBuy:
 		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
 			// we're going to adjust the known amount to a fixed-point number for our quote calculations
@@ -284,7 +282,30 @@ func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.Pool
 		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
 	}
 
-	return unknownAmount, nil
+	return unknownAmount, instruction, nil
+}
+
+func parseIntent(intentLine string) (*IntentInstruction, error) {
+	intentParts := strings.Fields(intentLine)
+	if len(intentParts) != 2 {
+		return nil, errors.New("intent instructions must be a <verb> <amount>, and one pair per line")
+	}
+	verb := intentParts[0]
+	knownAmountStr := intentParts[1]
+	knownAmount, ok := new(big.Int).SetString(knownAmountStr, 10)
+	if !ok {
+		return nil, fmt.Errorf("the amount provided is an invalid decimal number: %q", knownAmountStr)
+	}
+	dir, err := verbToSwapDir(verb)
+	if err != nil {
+		return nil, err
+	}
+	return &IntentInstruction{
+		Verb:      verb,
+		AmountStr: knownAmountStr,
+		Amount:    knownAmount,
+		Dir:       dir,
+	}, nil
 }
 
 func verbToSwapDir(verb string) (SwapDir, error) {
@@ -352,11 +373,38 @@ func main() {
 	decimals := append([]any{"Decimals"}, mapPtrSliceRetAny(balances, func(elm *PoolBalance) any { return elm.Decimals })...)
 	t.AppendRow(decimals)
 
+	targetAddr := Addr(*tokenAddr)
 	cp := ConstantProduct{}
-	unknownAmount, err := cp.DoIntent(*intentLine, pool, Addr(*tokenAddr), balances...)
+	unknownAmount, intentMeta, err := cp.DoIntent(*intentLine, pool, targetAddr, balances...)
 	if err != nil {
 		log.Fatalf("intent execution failed: %s\n", err)
 	}
-	t.AppendRow(table.Row{"Intent", fmt.Sprintf("executing %s", *intentLine), humanAmount(unknownAmount, 9, 9)})
+	intentRow := table.Row{"Intent", "", ""}
+	targetIdx := 0
+	if targetAddr == Addr(pool.Token1Mint.String()) {
+		targetIdx = 1
+	}
+	counterIdx := 1 - targetIdx
+
+	var counterDecimals uint8
+	_ = counterDecimals
+	if counterIdx < len(balances) && balances[counterIdx] != nil {
+		counterDecimals = balances[counterIdx].Decimals
+	}
+	// counterAmount := humanAmount(unknownAmount, counterDecimals, int(counterDecimals))
+	counterAmount := unknownAmount
+	intentText := fmt.Sprintf("%s %s", intentMeta.Verb, intentMeta.AmountStr)
+
+	switch intentMeta.Dir {
+	case SwapDirSell:
+		intentRow[targetIdx+1] = intentText
+		intentRow[counterIdx+1] = fmt.Sprintf("receiving %s", counterAmount)
+	case SwapDirBuy:
+		intentRow[targetIdx+1] = intentText
+		intentRow[counterIdx+1] = fmt.Sprintf("paying %s", counterAmount)
+	default: // SwapDirUnknown
+		panic("we really shouldn't be here, did we forget to handle the error returned from verbToSwapDir?")
+	}
+	t.AppendRow(intentRow)
 	t.Render()
 }
