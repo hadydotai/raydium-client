@@ -1,5 +1,7 @@
 # Raydium Client
 
+![screenshot](./image.png)
+
 Hopefully will be a DeFi client at some point, for now I'm starting with Raydium
 and figuring out my way around Solana. Curious things going on there.
 
