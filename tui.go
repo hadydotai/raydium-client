@@ -195,14 +195,8 @@ func (ui *termUI) handleKey(ev termbox.Event) bool {
 func (ui *termUI) draw() {
 	termbox.Clear(termbox.ColorDefault, termbox.ColorDefault)
 	width, height := termbox.Size()
-	tableArea := height - 2
-	if tableArea < 0 {
-		tableArea = 0
-	}
-	linesToShow := len(ui.tableLines)
-	if linesToShow > tableArea {
-		linesToShow = tableArea
-	}
+	tableArea := max(height-2, 0)
+	linesToShow := min(len(ui.tableLines), tableArea)
 	startRow := 0
 	if linesToShow < tableArea {
 		startRow = tableArea - linesToShow
@@ -214,7 +208,7 @@ func (ui *termUI) draw() {
 		fg = termbox.ColorWhite | termbox.AttrBold
 		bg = termbox.ColorGreen
 	}
-	for i := 0; i < linesToShow; i++ {
+	for i := range linesToShow {
 		ui.drawTextColor(0, startRow+i, width, ui.tableLines[i], fg, bg)
 	}
 	if height >= 2 {
