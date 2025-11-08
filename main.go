@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 
 	"hadydotai/raydium-client/raydium_cp_swap"
@@ -52,22 +53,6 @@ const (
 	SwapDirSell
 )
 
-type Intent struct {
-	Direction SwapDir
-	CP        ConstantProduct
-}
-
-func verbToSwapDir(verb string) (SwapDir, error) {
-	switch verb {
-	case "pay", "sell", "swap":
-		return SwapDirBuy, nil
-	case "buy", "get":
-		return SwapDirSell, nil
-	default:
-		return SwapDirUnknown, fmt.Errorf("verb(%s) has no clear swap direction", verb)
-	}
-}
-
 // mapPtrSliceRetAny maps over a slice of pointers, passing each element to a projection function to pick any value out
 // and collect that back into a new slice.
 func mapPtrSliceRetAny[Slice ~[]*Elm, Elm any](s Slice, m func(elm *Elm) any) []any {
@@ -82,9 +67,13 @@ func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	if raw == nil {
 		return "0"
 	}
-	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	scale := fixedPointScale(decimals)
 	rat := new(big.Rat).SetFrac(raw, scale)
 	return rat.FloatString(precision)
+}
+
+func fixedPointScale(decimals uint8) *big.Int {
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
 }
 
 type PoolBalance struct {
@@ -145,6 +134,8 @@ type ConstantProduct struct {
 }
 
 // QuoteOut takes an amount in TokenIn and will produce an amount in TokenOut: amountIn -> amountOut
+// In layman's terms, this figures out how much we get out of the pool, provided the amount we put into the pool.
+// All amounts are in their respective tokens of course
 func (cp ConstantProduct) QuoteOut(amountIn *big.Int) *big.Int {
 	// Some defensive house keeping. Go, you're killing me.
 	if amountIn == nil {
@@ -192,6 +183,9 @@ func (cp ConstantProduct) QuoteOut(amountIn *big.Int) *big.Int {
 	return amountOut
 }
 
+// QuoteIn takes an amount in TokenOut and will produce an amount in TokenIn: amountOut -> amountIn
+// In layman's terms, this figures out how much we need to give, to match the amount we want out of the pool.
+// All amounts are in their respective tokens of course
 func (cp ConstantProduct) QuoteIn(amountOut *big.Int) *big.Int {
 	// Some defensive house keeping. Go, you're killing me, but a little reptition won't kill you.
 	if amountOut == nil {
@@ -223,7 +217,7 @@ func (cp ConstantProduct) QuoteIn(amountOut *big.Int) *big.Int {
 	//				^
 	//				|{newReserveIn}
 	//					=> our target amountIn will
-	//				{newReserve} - X = dX
+	//				{newReserveIn} - X = dX
 	//	science.
 
 	reserveIn, reserveOut := cp.TokenInReserve.Balance, cp.TokenOutReserve.Balance
@@ -240,15 +234,76 @@ func (cp ConstantProduct) QuoteIn(amountOut *big.Int) *big.Int {
 		// I think this should be a flat out error and yell at the user for it, maybe?
 		return big.NewInt(0)
 	}
-	return amountOut
+	return amountIn
+}
+
+func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*big.Int, error) {
+	intentParts := strings.Fields(intentLine)
+	if len(intentParts) > 2 {
+		return nil, errors.New("intent instructions must be a <verb> <amount>, and one pair per line")
+	}
+	if len(balances) > 2 {
+		// NOTE(@hadydotai): Who's fault is this actually? Mine or the users? Possible location for a panic here as
+		// I don't think we should actually be here at all.
+		return nil, errors.New("intents are handled per pool which is a pair of tokens, we're receiving more than 2 balances")
+	}
+	verb := intentParts[0]
+	knownAmountStr := intentParts[1]
+	knownAmount, ok := new(big.Int).SetString(knownAmountStr, 10)
+	unknownAmount := new(big.Int)
+	if !ok {
+		return nil, fmt.Errorf("the amount provided is an invalid decimal number: %q", knownAmountStr)
+	}
+
+	dir, err := verbToSwapDir(verb)
+	if err != nil {
+		return nil, err
+	}
+	switch dir {
+	case SwapDirBuy:
+		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
+			// we're going to adjust the known amount to a fixed-point number for our quote calculations
+			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[0].Decimals))
+			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
+		} else {
+			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[1].Decimals))
+			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
+		}
+		unknownAmount = cp.QuoteIn(knownAmount)
+	case SwapDirSell:
+		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
+			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[1].Decimals))
+			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
+		} else {
+			knownAmount = new(big.Int).Mul(knownAmount, fixedPointScale(balances[0].Decimals))
+			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
+		}
+		unknownAmount = cp.QuoteOut(knownAmount)
+
+	default: // SwapDirUnknown
+		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
+	}
+
+	return unknownAmount, nil
+}
+
+func verbToSwapDir(verb string) (SwapDir, error) {
+	switch verb {
+	case "pay", "sell", "swap":
+		return SwapDirSell, nil
+	case "buy", "get":
+		return SwapDirBuy, nil
+	default:
+		return SwapDirUnknown, fmt.Errorf("verb(%s) has no clear swap direction", verb)
+	}
 }
 
 func main() {
 	var (
-		rpcEP    = flag.String("rpc", rpc.MainNetBeta_RPC, "RPC to connect to")
-		poolAddr = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
-		_        = flag.String("intent", "pay 100", "Intent and direction of the trade")
-		_        = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
+		rpcEP      = flag.String("rpc", rpc.DevNet_RPC, "RPC to connect to")
+		poolAddr   = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
+		intentLine = flag.String("intent", "pay 100", "Intent and direction of the trade")
+		tokenAddr  = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
 	)
 	flag.Parse()
 
@@ -276,7 +331,7 @@ func main() {
 	t.SetTitle(*poolAddr)
 	t.SetCaption("CPMM/CP-Swap Raydium Pool")
 	t.AppendHeader(table.Row{"", "Token 0", "Token 1"})
-	t.AppendRow(table.Row{"Addr", pool.Token0Mint.String(), pool.Token1Mint.String()})
+	t.AppendRow(table.Row{"Addr", Addr(pool.Token0Mint.String()), Addr(pool.Token1Mint.String())})
 
 	balances, errs := poolBalances(ctx, client, []solana.PublicKey{pool.Token0Vault, pool.Token1Vault})
 	balancesDisplay := make([]any, len(balances)+1)
@@ -296,5 +351,12 @@ func main() {
 	// decimals := make([]any, len(balances)+1)
 	decimals := append([]any{"Decimals"}, mapPtrSliceRetAny(balances, func(elm *PoolBalance) any { return elm.Decimals })...)
 	t.AppendRow(decimals)
+
+	cp := ConstantProduct{}
+	unknownAmount, err := cp.DoIntent(*intentLine, pool, Addr(*tokenAddr), balances...)
+	if err != nil {
+		log.Fatalf("intent execution failed: %s\n", err)
+	}
+	t.AppendRow(table.Row{"Intent", fmt.Sprintf("executing %s", *intentLine), humanAmount(unknownAmount, 9, 9)})
 	t.Render()
 }
