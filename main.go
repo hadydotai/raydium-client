@@ -199,6 +199,10 @@ func (cp ConstantProduct) QuoteOut(amountIn *big.Int) (*big.Int, error) {
 		// I think this should be a flat out error and yell at the user for it, maybe?
 		return nil, errors.New("trade would not yield a positive output amount")
 	}
+	if amountOut.Cmp(reserveOut) >= 0 {
+		available := humanAmount(reserveOut, cp.TokenOutReserve.Decimals, int(cp.TokenOutReserve.Decimals))
+		return nil, fmt.Errorf("requested output would exceed available %s liquidity", available)
+	}
 	return amountOut, nil
 }
 
