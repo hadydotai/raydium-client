@@ -409,38 +409,38 @@ func main() {
 	cp := ConstantProduct{}
 	unknownAmount, intentMeta, intentErr := cp.DoIntent(*intentLine, pool, targetAddr, balances...)
 	intentRow := table.Row{"Intent", "", ""}
-	targetIdx := 0
+	targetTokenCell := 0
 	if targetAddr == Addr(pool.Token1Mint.String()) {
-		targetIdx = 1
+		targetTokenCell = 1
 	}
-	counterIdx := 1 - targetIdx
+	counterTokenCell := 1 - targetTokenCell
 
 	if intentErr != nil {
 		errMsg := fmt.Sprintf("intent failed: %s", intentErr)
 		if intentMeta != nil {
 			errMsg = fmt.Sprintf("%s %s failed: %s", intentMeta.Verb, intentMeta.AmountStr, intentErr)
 		}
-		intentRow[targetIdx+1] = errMsg
-		intentRow[counterIdx+1] = errMsg
+		intentRow[targetTokenCell+1] = errMsg
+		intentRow[counterTokenCell+1] = errMsg
 		t.AppendRow(intentRow)
 		t.Render()
 		return
 	}
 
-	var counterDecimals uint8
-	if counterIdx < len(balances) && balances[counterIdx] != nil {
-		counterDecimals = balances[counterIdx].Decimals
+	var counterTokenDecimals uint8
+	if counterTokenCell < len(balances) && balances[counterTokenCell] != nil {
+		counterTokenDecimals = balances[counterTokenCell].Decimals
 	}
-	counterAmount := humanAmount(unknownAmount, counterDecimals, int(counterDecimals))
+	counterTokenAmount := humanAmount(unknownAmount, counterTokenDecimals, int(counterTokenDecimals))
 	intentText := fmt.Sprintf("%s %s", intentMeta.Verb, intentMeta.AmountStr)
 
 	switch intentMeta.Dir {
 	case SwapDirSell:
-		intentRow[targetIdx+1] = intentText
-		intentRow[counterIdx+1] = fmt.Sprintf("receiving %s", counterAmount)
+		intentRow[targetTokenCell+1] = intentText
+		intentRow[counterTokenCell+1] = fmt.Sprintf("receiving %s", counterTokenAmount)
 	case SwapDirBuy:
-		intentRow[targetIdx+1] = intentText
-		intentRow[counterIdx+1] = fmt.Sprintf("paying %s", counterAmount)
+		intentRow[targetTokenCell+1] = intentText
+		intentRow[counterTokenCell+1] = fmt.Sprintf("paying %s", counterTokenAmount)
 	default: // SwapDirUnknown
 		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
 	}
