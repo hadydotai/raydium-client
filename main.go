@@ -153,6 +153,7 @@ func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.Publi
 type ConstantProduct struct {
 	TokenInReserve  *PoolBalance
 	TokenOutReserve *PoolBalance
+	TreeFeeRate     uint64
 }
 
 // QuoteOut takes an amount in TokenIn and will produce an amount in TokenOut: amountIn -> amountOut
@@ -371,12 +372,23 @@ func main() {
 	ctx := context.Background()
 	accountInfo, err := client.GetAccountInfoWithOpts(ctx, poolPubK, &rpc.GetAccountInfoOpts{Encoding: solana.EncodingBase64})
 	if err != nil {
-		log.Fatalf("rpc call getAccountInfo failed, check if the RPC endpoint is valid, or if you're being limited: %s\n", err)
+		log.Fatalf("rpc call getAccountInfo for Pool failed, check if the RPC endpoint is valid, or if you're being limited: %s\n", err)
 	}
 
 	pool, err := raydium_cp_swap.ParseAccount_PoolState(accountInfo.Value.Data.GetBinary())
 	if err != nil {
 		log.Fatalf("parsing PoolState failed, make sure the pool address you passed is a Raydium CP-Swap/CPMM pool: %s\n", err)
+	}
+
+	poolAmm, err := client.GetAccountInfoWithOpts(ctx, pool.AmmConfig, &rpc.GetAccountInfoOpts{Encoding: solana.EncodingBase64})
+	if err != nil {
+		log.Fatalf("rpc call getAccountInfo for Pool's AmmConfig failed, check if the RPC endpoint is valid, or if you're being limited: %s\n", err)
+	}
+
+	poolAmmConfig, err := raydium_cp_swap.ParseAccount_AmmConfig(poolAmm.Value.Data.GetBinary())
+	if err != nil {
+		// NOTE(@hadydotai): Just occurred to me, if the pool is inactive, are we going to end up here?
+		log.Fatalf("parsing pool's AmmConfig failed: %s\n", err)
 	}
 
 	t := table.NewWriter()
@@ -406,7 +418,9 @@ func main() {
 	t.AppendRow(decimals)
 
 	targetAddr := Addr(*tokenAddr)
-	cp := ConstantProduct{}
+	cp := ConstantProduct{
+		TreeFeeRate: poolAmmConfig.TradeFeeRate,
+	}
 	unknownAmount, intentMeta, intentErr := cp.DoIntent(*intentLine, pool, targetAddr, balances...)
 	intentRow := table.Row{"Intent", "", ""}
 	targetTokenCell := 0
