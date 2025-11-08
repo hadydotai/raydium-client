@@ -14,11 +14,20 @@ import (
 	"hadydotai/raydium-client/raydium_cp_swap"
 
 	solana "github.com/gagliardetto/solana-go"
+	atapkg "github.com/gagliardetto/solana-go/programs/associated-token-account"
+	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/jedib0t/go-pretty/v6/table"
 )
 
-var CPMMProgramPubK = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
+var (
+	CPMMProgramPubK     = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
+	ATAProgramID        = atapkg.ProgramID
+	SystemProgramID     = system.ProgramID
+	DefaultUnitLimit    = uint32(200_000_000) // rough ballpark, https://solana.com/docs/core/fees and from simulating a few transactions
+	DefaultUnitPriceMic = uint64(5000)        // micro-lamports, 0.005 lamports
+	//TODO(@hadydotai): Figure out how to give the user the ability to adjust priority fees
+)
 
 // Addr represents an address on the blockchain, which can render nicely truncated in the middle with ellipsis.
 // This is my poor man's solution to fixing these long addresses until I figure out how to deal with and find ticker
@@ -427,12 +436,18 @@ func verbToSwapDir(verb string) (SwapDir, error) {
 
 func main() {
 	var (
-		rpcEP      = flag.String("rpc", rpc.DevNet_RPC, "RPC to connect to")
-		poolAddr   = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
-		intentLine = flag.String("intent", "pay 100", "Intent and direction of the trade")
-		tokenAddr  = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
+		hotwalletPath = flag.String("hotwallet", "", "Path to the hotwallet to use for signing transactions")
+		rpcEP         = flag.String("rpc", rpc.DevNet_RPC, "RPC to connect to")
+		poolAddr      = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
+		intentLine    = flag.String("intent", "pay 100", "Intent and direction of the trade")
+		tokenAddr     = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
 	)
 	flag.Parse()
+
+	payer, err := solana.PrivateKeyFromSolanaKeygenFile(*hotwalletPath)
+	if err != nil {
+		log.Fatalf("failed to load private key from hot wallet: %s\n", err)
+	}
 
 	poolPubK, err := solana.PublicKeyFromBase58(*poolAddr)
 	if err != nil {
@@ -537,4 +552,5 @@ func main() {
 	}
 	t.AppendRow(intentRow)
 	t.Render()
+
 }
