@@ -150,12 +150,24 @@ So, let's do it.
 - [x] Improve our intent row and balances row display in the table, also surface
       errors inline
 - [x] Fees, fees, fees.
-- [ ] Make a trade. I have no idea how this will work out, I've been looking
+- [x] Spring cleaning, code's growing and I have a clear structure in mind, a
+      clear intent behind the application, and I have a moderate understanding
+      of the problem. Slice the cake.
+- [ ] Fix our poolBalances check, read the comment. `len(balances)` is the wrong
+      error signal, both `balances` and `errs` have a length, they're allocated
+      as `make(type, size where size = kConst)`. Not sure how to solve this at
+      the moment, maybe I pull my `Any` slice helper from one of my projects?
+- [ ] Make a trade. ~~I have no idea how this will work out, I've been looking
       over CP-Swap's source code and I see two swap instructions, one
       `swap_base_input` and one `swap_base_output`. The what, where, and why is
-      unclear. I'll ask Preplexity for some pointers later. There's enough
-      examples of swap instructions though, an abundance really, which is
-      lovely.
+      unclear. I'll ask Preplexity for some pointers later.~~ Kind of an idea
+      now, also `swap_base_input` is basically max output and `swap_base_output`
+      is max input, or the other way around. Anyway, that's the gist. Thinking
+      about it now, I'm actually not so sure I want to support both yet. I'm
+      quoting both directions anyway, also my intent modeling handles both
+      directions, a little iffy around `QuoteIn`'s fee handling, I have to test
+      this more.
+- [ ] Let's add some tests, I've done enough exploration, this thing is rolling.
 - [ ] Pull in all the CP-Swap pools for a pair and filter through that instead
       of providing the pool address directly.
 - [ ] I'd like to deal with tickers instead of addresses, there doesn't seem to
@@ -164,7 +176,8 @@ So, let's do it.
       [a series of issues relevant to metadata](https://github.com/gagliardetto/solana-go/issues?q=is%3Aissue%20token%20metadata).
       Not sure if any would be useful but will cross that bridge when we get to
       it.
-- [ ] Trading REPL
+- [x] Trading ~~REPL~~ BAPL - Barely-A-rePL. Not everything I wanted and had in
+      mind, but the foundation is there. I can ship this.
 - [ ] I can already see calls like `getProgramAccounts` being a problem, can I
       cache it? When do I invalidate the cache? I think I can update it with a
       diff if I calculate the offset at which I last cached. Some bit math for a

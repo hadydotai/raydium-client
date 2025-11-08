@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"os"
 	"strings"
 	"sync"
 
@@ -17,7 +16,6 @@ import (
 	atapkg "github.com/gagliardetto/solana-go/programs/associated-token-account"
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
-	"github.com/jedib0t/go-pretty/v6/table"
 )
 
 var (
@@ -61,16 +59,6 @@ const (
 	SwapDirBuy
 	SwapDirSell
 )
-
-// mapPtrSliceRetAny maps over a slice of pointers, passing each element to a projection function to pick any value out
-// and collect that back into a new slice.
-func mapPtrSliceRetAny[Slice ~[]*Elm, Elm any](s Slice, m func(elm *Elm) any) []any {
-	mapped := []any{}
-	for _, elm := range s {
-		mapped = append(mapped, m(elm))
-	}
-	return mapped
-}
 
 func fixedPointScale(decimals uint8) *big.Int {
 	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
@@ -448,6 +436,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load private key from hot wallet: %s\n", err)
 	}
+	_ = payer
 
 	poolPubK, err := solana.PublicKeyFromBase58(*poolAddr)
 	if err != nil {
@@ -481,76 +470,28 @@ func main() {
 		log.Fatalf("parsing pool's AmmConfig failed: %s\n", err)
 	}
 
-	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.SetTitle(*poolAddr)
-	t.SetCaption("CPMM/CP-Swap Raydium Pool")
-	t.AppendHeader(table.Row{"", "Token 0", "Token 1"})
-	t.AppendRow(table.Row{"Addr", Addr(pool.Token0Mint.String()), Addr(pool.Token1Mint.String())})
-
-	balances, errs := poolBalances(ctx, client, []solana.PublicKey{pool.Token0Vault, pool.Token1Vault})
-	balancesDisplay := make([]any, len(balances)+1)
-	balancesDisplay[0] = "Balances"
-	for i := range balances {
-		if errs[i] != nil {
-			balancesDisplay[i+1] = err
-			continue
-		}
-		balancesDisplay[i+1] = humanAmount(balances[i].Balance, balances[i].Decimals, int(balances[i].Decimals))
-	}
-	t.AppendRow(balancesDisplay)
-
-	// NOTE(@hadydotai): Here's a little false-positive quirk with static analysis, uncomment the next line
-	// and change the decl+assign operator `:=` before the append to `=`, reassigning decimals. Can you figure out why
-	// go-static analysis complains about this? Hint: SSA.
-	// decimals := make([]any, len(balances)+1)
-	decimals := append([]any{"Decimals"}, mapPtrSliceRetAny(balances, func(elm *PoolBalance) any { return elm.Decimals })...)
-	t.AppendRow(decimals)
-	tradeFeeRow := formatFeeRate(poolAmmConfig.TradeFeeRate)
-	t.AppendRow(table.Row{"Trade fee", tradeFeeRow, tradeFeeRow})
-
 	targetAddr := Addr(*tokenAddr)
-	cp := ConstantProduct{
-		TradeFeeRate: poolAmmConfig.TradeFeeRate,
+	builder := &TableBuilder{
+		ctx:           ctx,
+		client:        client,
+		pool:          pool,
+		poolAmmConfig: poolAmmConfig,
+		targetAddr:    targetAddr,
+		poolAddress:   *poolAddr,
 	}
-	unknownAmount, intentMeta, intentErr := cp.DoIntent(*intentLine, pool, targetAddr, balances...)
-	intentRow := table.Row{"Intent", "", ""}
-	targetTokenCell := 0
-	if targetAddr == Addr(pool.Token1Mint.String()) {
-		targetTokenCell = 1
+	ui := newTermUI(builder)
+	decision, err := ui.Run(*intentLine)
+	if err != nil {
+		log.Fatalf("interactive UI failed: %s\n", err)
 	}
-	counterTokenCell := 1 - targetTokenCell
-
-	if intentErr != nil {
-		errMsg := fmt.Sprintf("intent failed: %s", intentErr)
-		if intentMeta != nil {
-			errMsg = fmt.Sprintf("%s %s failed: %s", intentMeta.Verb, intentMeta.AmountStr, intentErr)
-		}
-		intentRow[targetTokenCell+1] = errMsg
-		intentRow[counterTokenCell+1] = errMsg
-		t.AppendRow(intentRow)
-		t.Render()
-		return
+	switch decision {
+	case decisionProceed:
+		fmt.Println("Proceeding with the current intent (action not yet implemented).")
+	case decisionDecline:
+		fmt.Println("User chose not to proceed.")
+	case decisionAbort:
+		fmt.Println("Session aborted.")
+	default:
+		fmt.Println("Exited without an explicit decision.")
 	}
-
-	var counterTokenDecimals uint8
-	if counterTokenCell < len(balances) && balances[counterTokenCell] != nil {
-		counterTokenDecimals = balances[counterTokenCell].Decimals
-	}
-	counterTokenAmount := humanAmount(unknownAmount, counterTokenDecimals, int(counterTokenDecimals))
-	intentText := fmt.Sprintf("%s %s", intentMeta.Verb, intentMeta.AmountStr)
-
-	switch intentMeta.Dir {
-	case SwapDirSell:
-		intentRow[targetTokenCell+1] = intentText
-		intentRow[counterTokenCell+1] = fmt.Sprintf("receiving %s", counterTokenAmount)
-	case SwapDirBuy:
-		intentRow[targetTokenCell+1] = intentText
-		intentRow[counterTokenCell+1] = fmt.Sprintf("paying %s", counterTokenAmount)
-	default: // SwapDirUnknown
-		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
-	}
-	t.AppendRow(intentRow)
-	t.Render()
-
 }
