@@ -35,19 +35,20 @@ type renderResult struct {
 }
 
 type termUI struct {
-	builder       *TableBuilder
-	resultCh      chan renderResult
-	done          chan struct{}
-	mode          uiMode
-	promptBuffer  []rune
-	tableLines    []string
-	busy          bool
-	busyIntent    string
-	currentIntent string
-	spinnerFrame  int
-	statusMessage string
-	decision      userDecision
-	cursorVisible bool
+	builder         *TableBuilder
+	resultCh        chan renderResult
+	done            chan struct{}
+	mode            uiMode
+	promptBuffer    []rune
+	tableLines      []string
+	busy            bool
+	busyIntent      string
+	currentIntent   string
+	spinnerFrame    int
+	statusMessage   string
+	decision        userDecision
+	cursorVisible   bool
+	tableFlashUntil time.Time
 }
 
 func newTermUI(builder *TableBuilder) *termUI {
@@ -99,6 +100,7 @@ func (ui *termUI) Run(initialIntent string) (userDecision, error) {
 			} else {
 				ui.tableLines = splitLines(res.table)
 				ui.statusMessage = "Press y=yes, n=no, c=change."
+				ui.tableFlashUntil = time.Now().Add(350 * time.Millisecond)
 				ui.mode = modeAwaitDecision
 			}
 		case <-ticker.C:
@@ -205,8 +207,15 @@ func (ui *termUI) draw() {
 	if linesToShow < tableArea {
 		startRow = tableArea - linesToShow
 	}
+	fg := termbox.ColorDefault
+	bg := termbox.ColorDefault
+	flashActive := time.Now().Before(ui.tableFlashUntil)
+	if flashActive {
+		fg = termbox.ColorWhite | termbox.AttrBold
+		bg = termbox.ColorGreen
+	}
 	for i := 0; i < linesToShow; i++ {
-		ui.drawText(0, startRow+i, width, ui.tableLines[i])
+		ui.drawTextColor(0, startRow+i, width, ui.tableLines[i], fg, bg)
 	}
 	if height >= 2 {
 		ui.drawText(0, height-2, width, ui.statusLine())
@@ -219,6 +228,10 @@ func (ui *termUI) draw() {
 }
 
 func (ui *termUI) drawText(x, y, width int, text string) {
+	ui.drawTextColor(x, y, width, text, termbox.ColorDefault, termbox.ColorDefault)
+}
+
+func (ui *termUI) drawTextColor(x, y, width int, text string, fg, bg termbox.Attribute) {
 	if y < 0 {
 		return
 	}
@@ -227,7 +240,7 @@ func (ui *termUI) drawText(x, y, width int, text string) {
 		if col >= width {
 			break
 		}
-		termbox.SetCell(x+col, y, ch, termbox.ColorDefault, termbox.ColorDefault)
+		termbox.SetCell(x+col, y, ch, fg, bg)
 		col++
 	}
 }
