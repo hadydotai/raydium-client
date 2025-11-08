@@ -42,7 +42,7 @@ func (addr Addr) String() string {
 const (
 	wSOLMintAddr    Addr = "So11111111111111111111111111111111111111112"
 	ourCorePoolAddr Addr = "3ELLbDZkimZSpnWoWVAfDzeG24yi2LC4sB35ttfNCoEi"
-	feeRateDenom         = 1e6 // https://github.com/raydium-io/raydium-cp-swap/blob/master/programs/cp-swap/src/curve/fees.rs#L3
+	feeRateDenom         = int64(1_000_000) // https://github.com/raydium-io/raydium-cp-swap/blob/master/programs/cp-swap/src/curve/fees.rs#L3
 )
 
 type SwapDir uint8
@@ -74,6 +74,18 @@ func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	scale := fixedPointScale(decimals)
 	rat := new(big.Rat).SetFrac(raw, scale)
 	return rat.FloatString(precision)
+}
+
+func formatFeeRate(ppm uint64) string {
+	ratePct := new(big.Rat).SetFrac(big.NewInt(int64(ppm)), big.NewInt(feeRateDenom))
+	ratePct.Mul(ratePct, big.NewRat(100, 1))
+	formatted := ratePct.FloatString(6)
+	formatted = strings.TrimRight(formatted, "0")
+	formatted = strings.TrimSuffix(formatted, ".")
+	if formatted == "" {
+		formatted = "0"
+	}
+	return fmt.Sprintf("%s%%", formatted)
 }
 
 func humanToFixed(amountStr string, decimals uint8) (*big.Int, error) {
@@ -153,12 +165,63 @@ func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.Publi
 type ConstantProduct struct {
 	TokenInReserve  *PoolBalance
 	TokenOutReserve *PoolBalance
-	TreeFeeRate     uint64
+	TradeFeeRate    uint64
 }
 
-// QuoteOut takes an amount in TokenIn and will produce an amount in TokenOut: amountIn -> amountOut
+func (cp ConstantProduct) tradeFeeNumerator() (int64, error) {
+	if cp.TradeFeeRate >= uint64(feeRateDenom) {
+		// NOTE(@hadydotai): No other place to cover this issue of `feeRateDenom` potentially going out of sync
+		// with the contract. It's a hard coded value after all. I wonder if they expose it on chain.
+		return 0, fmt.Errorf("trade fee rate %d is invalid", cp.TradeFeeRate)
+	}
+	return feeRateDenom - int64(cp.TradeFeeRate), nil
+}
+
+func (cp ConstantProduct) amountAfterTradeFee(amount *big.Int) (*big.Int, error) {
+	if amount == nil {
+		return nil, errors.New("amount cannot be nil when applying trade fee")
+	}
+	numerator, err := cp.tradeFeeNumerator()
+	if err != nil {
+		return nil, err
+	}
+	net := new(big.Int).Mul(amount, big.NewInt(numerator))
+	net.Quo(net, big.NewInt(feeRateDenom))
+	if net.Sign() <= 0 {
+		return nil, errors.New("amount becomes zero after applying trade fee")
+	}
+	return net, nil
+}
+
+func (cp ConstantProduct) amountBeforeTradeFee(net *big.Int) (*big.Int, error) {
+	if net == nil {
+		return nil, errors.New("amount cannot be nil when removing trade fee")
+	}
+	numerator, err := cp.tradeFeeNumerator()
+	if err != nil {
+		return nil, err
+	}
+	if net.Sign() <= 0 {
+		return nil, errors.New("amount must be greater than zero when removing trade fee")
+	}
+	grossNumerator := new(big.Int).Mul(net, big.NewInt(feeRateDenom))
+	divisor := big.NewInt(numerator)
+	quotient := new(big.Int)
+	remainder := new(big.Int)
+	quotient.QuoRem(grossNumerator, divisor, remainder)
+	if remainder.Sign() > 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if quotient.Sign() <= 0 {
+		return nil, errors.New("trade would not require a positive input amount")
+	}
+	return quotient, nil
+}
+
+// QuoteOut (selling) takes an amount in TokenIn and will produce an amount in TokenOut: amountIn -> amountOut
 // In layman's terms, this figures out how much we get out of the pool, provided the amount we put into the pool.
-// All amounts are in their respective tokens of course
+// All amounts are in their respective tokens of course.
+// NOTE: Fee is applied directly on the amountIn before being added to the reserve
 func (cp ConstantProduct) QuoteOut(amountIn *big.Int) (*big.Int, error) {
 	// Some defensive house keeping. Go, you're killing me.
 	if amountIn == nil || amountIn.Sign() <= 0 {
@@ -191,8 +254,12 @@ func (cp ConstantProduct) QuoteOut(amountIn *big.Int) (*big.Int, error) {
 	//				Y - {newReserveOut} = dY
 	//	science.
 	reserveIn, reserveOut := cp.TokenInReserve.Balance, cp.TokenOutReserve.Balance
+	netAmountIn, err := cp.amountAfterTradeFee(amountIn)
+	if err != nil {
+		return nil, err
+	}
 	constantProductK := new(big.Int).Mul(reserveIn, reserveOut)
-	updatedReserveIn := new(big.Int).Add(reserveIn, amountIn)
+	updatedReserveIn := new(big.Int).Add(reserveIn, netAmountIn)
 	newReserveOut := new(big.Int).Quo(constantProductK, updatedReserveIn)
 	amountOut := new(big.Int).Sub(reserveOut, newReserveOut)
 	if amountOut.Sign() <= 0 {
@@ -207,9 +274,11 @@ func (cp ConstantProduct) QuoteOut(amountIn *big.Int) (*big.Int, error) {
 	return amountOut, nil
 }
 
-// QuoteIn takes an amount in TokenOut and will produce an amount in TokenIn: amountOut -> amountIn
+// QuoteIn (buying) takes an amount in TokenOut and will produce an amount in TokenIn: amountOut -> amountIn
 // In layman's terms, this figures out how much we need to give, to match the amount we want out of the pool.
 // All amounts are in their respective tokens of course
+// NOTE: To work out the fee here, we work backwards. First we get the net input we'd need to receive the asking amount
+// then we apply the fee
 func (cp ConstantProduct) QuoteIn(amountOut *big.Int) (*big.Int, error) {
 	// Some defensive house keeping. Go, you're killing me, but a little reptition won't kill you.
 	if amountOut == nil || amountOut.Sign() <= 0 {
@@ -251,13 +320,17 @@ func (cp ConstantProduct) QuoteIn(amountOut *big.Int) (*big.Int, error) {
 	}
 	updatedReserveOut := new(big.Int).Sub(reserveOut, amountOut)
 	newReserveIn := new(big.Int).Quo(constantProductK, updatedReserveOut)
-	amountIn := new(big.Int).Sub(newReserveIn, reserveIn)
-	if amountIn.Sign() <= 0 {
+	netAmountIn := new(big.Int).Sub(newReserveIn, reserveIn)
+	if netAmountIn.Sign() <= 0 {
 		// NOTE(@hadydotai): we'd only end up here if we math our way into draining the pool on one side,
 		// I think this should be a flat out error and yell at the user for it, maybe?
 		return nil, errors.New("trade would not require a positive input amount")
 	}
-	return amountIn, nil
+	grossAmountIn, err := cp.amountBeforeTradeFee(netAmountIn)
+	if err != nil {
+		return nil, err
+	}
+	return grossAmountIn, nil
 }
 
 func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*big.Int, *IntentInstruction, error) {
@@ -384,7 +457,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("rpc call getAccountInfo for Pool's AmmConfig failed, check if the RPC endpoint is valid, or if you're being limited: %s\n", err)
 	}
-
+	if poolAmm == nil || poolAmm.Value == nil {
+		log.Fatalf("amm config account %s returned no data\n", pool.AmmConfig)
+	}
 	poolAmmConfig, err := raydium_cp_swap.ParseAccount_AmmConfig(poolAmm.Value.Data.GetBinary())
 	if err != nil {
 		// NOTE(@hadydotai): Just occurred to me, if the pool is inactive, are we going to end up here?
@@ -416,10 +491,12 @@ func main() {
 	// decimals := make([]any, len(balances)+1)
 	decimals := append([]any{"Decimals"}, mapPtrSliceRetAny(balances, func(elm *PoolBalance) any { return elm.Decimals })...)
 	t.AppendRow(decimals)
+	tradeFeeRow := formatFeeRate(poolAmmConfig.TradeFeeRate)
+	t.AppendRow(table.Row{"Trade fee", tradeFeeRow, tradeFeeRow})
 
 	targetAddr := Addr(*tokenAddr)
 	cp := ConstantProduct{
-		TreeFeeRate: poolAmmConfig.TradeFeeRate,
+		TradeFeeRate: poolAmmConfig.TradeFeeRate,
 	}
 	unknownAmount, intentMeta, intentErr := cp.DoIntent(*intentLine, pool, targetAddr, balances...)
 	intentRow := table.Row{"Intent", "", ""}

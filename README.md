@@ -142,7 +142,12 @@ So, let's do it.
       there's anything special going on there. There's also a demo repo and
       apparently a nicely documented
       [CPI repo](https://github.com/raydium-io/raydium-cpi). Might prove useful.
-- [ ] Fees, fees, fees.
+- [x] Validate intents and intent effects on the pool
+- [x] Fix handling decimal points on input
+- [x] Fix scaling the incorrect token balances
+- [x] Improve our intent row and balances row display in the table, also surface
+      errors inline
+- [x] Fees, fees, fees.
 - [ ] Make a trade. I have no idea how this will work out, I've been looking
       over CP-Swap's source code and I see two swap instructions, one
       `swap_base_input` and one `swap_base_output`. The what, where, and why is
