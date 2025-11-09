@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"hadydotai/raydium-client/raydium_cp_swap"
+	"math/big"
 	"strings"
+	"sync"
 
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 )
 
 type TableBuilder struct {
@@ -19,6 +22,33 @@ type TableBuilder struct {
 	poolAmmConfig *raydium_cp_swap.AmmConfig
 	targetAddr    Addr
 	poolAddress   string
+	slippageMu    sync.RWMutex
+	slippagePct   float64
+	slippageRat   *big.Rat
+}
+
+func (tb *TableBuilder) SetSlippagePct(pct float64) error {
+	rat, err := makeSlippageRatio(pct)
+	if err != nil {
+		return err
+	}
+	tb.slippageMu.Lock()
+	tb.slippagePct = pct
+	tb.slippageRat = rat
+	tb.slippageMu.Unlock()
+	return nil
+}
+
+func (tb *TableBuilder) slippage() (float64, *big.Rat) {
+	tb.slippageMu.RLock()
+	defer tb.slippageMu.RUnlock()
+	var ratioCopy *big.Rat
+	if tb.slippageRat != nil {
+		ratioCopy = new(big.Rat).Set(tb.slippageRat)
+	} else {
+		ratioCopy = big.NewRat(0, 1)
+	}
+	return tb.slippagePct, ratioCopy
 }
 
 func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, error) {
@@ -62,10 +92,15 @@ func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, er
 		decimals = append(decimals, bal.Decimals)
 	}
 	t.AppendRow(decimals)
+	t.AppendSeparator()
 	tradeFeeRow := formatFeeRate(tb.poolAmmConfig.TradeFeeRate)
 	t.AppendRow(table.Row{"Trade fee", tradeFeeRow, tradeFeeRow})
+	slippagePct, slippageRat := tb.slippage()
+	slippageRow := formatPercent(slippagePct)
+	t.AppendRow(table.Row{"Slippage", slippageRow, slippageRow}, table.RowConfig{AutoMerge: true, AutoMergeAlign: text.AlignLeft})
 
-	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate}
+	t.AppendSeparator()
+	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate, SlippageRatio: slippageRat, SlippagePct: slippagePct}
 	intentMeta, intentErr := cp.DoIntent(intentLine, tb.pool, tb.targetAddr, balances...)
 	intentRow := table.Row{"Intent", "", ""}
 	targetTokenCell := 0

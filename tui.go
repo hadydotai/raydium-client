@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,6 +27,13 @@ const (
 	userDecisionReject
 )
 
+type promptKind uint8
+
+const (
+	promptKindIntent promptKind = iota
+	promptKindSlippage
+)
+
 var spinnerFrames = []rune{'|', '/', '-', '\\'}
 
 type renderResult struct {
@@ -40,10 +48,12 @@ type termUI struct {
 	done            chan struct{}
 	mode            uiMode
 	promptBuffer    []rune
+	promptKind      promptKind
 	tableLines      []string
 	busy            bool
 	busyIntent      string
 	currentIntent   string
+	intentInput     string
 	spinnerFrame    int
 	statusMessage   string
 	intentMeta      *IntentInstruction
@@ -107,13 +117,15 @@ func (ui *termUI) Run(initialIntent string) (*IntentInstruction, error) {
 			ui.busy = false
 			ui.spinnerFrame = 0
 			ui.intentMeta = res.intentMeta
-			ui.currentIntent = res.intentMeta.String()
+			if res.intentMeta != nil {
+				ui.currentIntent = res.intentMeta.String()
+			}
 			if res.err != nil {
 				ui.statusMessage = fmt.Sprintf("failed to compute intent: %v", res.err)
 				ui.mode = modeAwaitDecision
 			} else {
 				ui.tableLines = splitLines(res.table)
-				ui.statusMessage = "Press y=yes, n=no, c=change."
+				ui.statusMessage = "Press y=yes, n=no, c=change intent, s=slippage."
 				ui.tableFlashUntil = time.Now().Add(350 * time.Millisecond)
 				ui.mode = modeAwaitDecision
 			}
@@ -134,6 +146,7 @@ func (ui *termUI) startCompute(intent string) {
 	ui.busy = true
 	ui.mode = modeBusy
 	ui.busyIntent = intent
+	ui.intentInput = intent
 	ui.spinnerFrame = 0
 	ui.statusMessage = ""
 	go func(intent string) {
@@ -165,6 +178,13 @@ func (ui *termUI) handleKey(ev termbox.Event) (userDecision, bool) {
 			ui.promptBuffer = ui.promptBuffer[:0]
 			ui.statusMessage = "Enter a new intent and press Enter."
 			ui.cursorVisible = true
+			ui.promptKind = promptKindIntent
+		case 's', 'S':
+			ui.mode = modePrompt
+			ui.promptBuffer = ui.promptBuffer[:0]
+			ui.statusMessage = "Enter slippage percent (e.g. 0.5) and press Enter."
+			ui.cursorVisible = true
+			ui.promptKind = promptKindSlippage
 		}
 		if ev.Key == termbox.KeyEsc {
 			return userDecisionReject, true
@@ -172,18 +192,46 @@ func (ui *termUI) handleKey(ev termbox.Event) (userDecision, bool) {
 	case modePrompt:
 		switch ev.Key {
 		case termbox.KeyEnter:
-			intent := strings.TrimSpace(string(ui.promptBuffer))
-			if intent == "" {
-				ui.statusMessage = "Intent cannot be empty."
+			value := strings.TrimSpace(string(ui.promptBuffer))
+			switch ui.promptKind {
+			case promptKindIntent:
+				if value == "" {
+					ui.statusMessage = "Intent cannot be empty."
+					return userDecisionNOOP, false
+				}
+				ui.promptBuffer = ui.promptBuffer[:0]
+				ui.startCompute(value)
+				return userDecisionNOOP, false
+			case promptKindSlippage:
+				if value == "" {
+					ui.statusMessage = "Slippage cannot be empty."
+					return userDecisionNOOP, false
+				}
+				parsed, err := strconv.ParseFloat(value, 64)
+				if err != nil {
+					ui.statusMessage = fmt.Sprintf("invalid slippage: %v", err)
+					return userDecisionNOOP, false
+				}
+				if err := ui.builder.SetSlippagePct(parsed); err != nil {
+					ui.statusMessage = err.Error()
+					return userDecisionNOOP, false
+				}
+				ui.promptBuffer = ui.promptBuffer[:0]
+				ui.mode = modeBusy
+				intent := ui.intentInput
+				if intent == "" {
+					intent = ui.currentIntent
+				}
+				if strings.TrimSpace(intent) == "" {
+					intent = "pay 100"
+				}
+				ui.startCompute(intent)
 				return userDecisionNOOP, false
 			}
-			ui.promptBuffer = ui.promptBuffer[:0]
-			ui.startCompute(intent)
-			return userDecisionNOOP, false
 		case termbox.KeyEsc:
 			ui.mode = modeAwaitDecision
 			ui.promptBuffer = ui.promptBuffer[:0]
-			ui.statusMessage = "Press y=yes, n=no, c=change."
+			ui.statusMessage = "Press y=yes, n=no, c=change intent, s=slippage."
 			ui.cursorVisible = true
 			return userDecisionNOOP, false
 		case termbox.KeyBackspace, termbox.KeyBackspace2:
@@ -259,13 +307,17 @@ func (ui *termUI) statusLine() string {
 	if ui.mode == modePrompt {
 		return "Enter a new intent and press Enter."
 	}
-	return "Press y=yes, n=no, c=change."
+	return "Press y=yes, n=no, c=change intent, s=slippage."
 }
 
 func (ui *termUI) promptLine() string {
 	switch ui.mode {
 	case modePrompt:
-		return "> " + string(ui.promptBuffer)
+		label := ">"
+		if ui.promptKind == promptKindSlippage {
+			label = "> slippage"
+		}
+		return label + " " + string(ui.promptBuffer)
 	default:
 		if ui.busy {
 			return "> ..."

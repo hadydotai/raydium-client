@@ -28,6 +28,10 @@ var (
 	//TODO(@hadydotai): Figure out how to give the user the ability to adjust priority fees
 )
 
+func init() {
+	raydium_cp_swap.ProgramID = solana.MustPublicKeyFromBase58("DRaycpLY18LhpbydsBWbVJtxpNv9oXPgjRSfpF2bWpYb")
+}
+
 // Addr represents an address on the blockchain, which can render nicely truncated in the middle with ellipsis.
 // This is my poor man's solution to fixing these long addresses until I figure out how to deal with and find ticker
 // symbols/token metadata on Solana
@@ -65,11 +69,6 @@ func fixedPointScale(decimals uint8) *big.Int {
 	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
 }
 
-func init() {
-	// raydium_cp_swap.ProgramID = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
-	raydium_cp_swap.ProgramID = solana.MustPublicKeyFromBase58("DRaycpLY18LhpbydsBWbVJtxpNv9oXPgjRSfpF2bWpYb")
-}
-
 func humanAmount(raw *big.Int, decimals uint8, precision int) string {
 	if raw == nil {
 		return "0"
@@ -89,6 +88,62 @@ func formatFeeRate(ppm uint64) string {
 		formatted = "0"
 	}
 	return fmt.Sprintf("%s%%", formatted)
+}
+
+func formatPercent(p float64) string {
+	str := strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", p), "0"), ".")
+	if str == "" {
+		str = "0"
+	}
+	return fmt.Sprintf("%s%%", str)
+}
+
+func makeSlippageRatio(percent float64) (*big.Rat, error) {
+	if percent < 0 {
+		return nil, fmt.Errorf("slippage percent must be >= 0")
+	}
+	if percent >= 100 {
+		return nil, fmt.Errorf("slippage percent must be less than 100")
+	}
+	if percent == 0 {
+		return big.NewRat(0, 1), nil
+	}
+	ratio := new(big.Rat).SetFloat64(percent / 100)
+	return ratio, nil
+}
+
+func applySlippageFloor(amount *big.Int, ratio *big.Rat) (*big.Int, error) {
+	if amount == nil {
+		return nil, errors.New("amount cannot be nil for slippage calculation")
+	}
+	if ratio == nil || ratio.Sign() == 0 {
+		return new(big.Int).Set(amount), nil
+	}
+	factor := new(big.Rat).Sub(big.NewRat(1, 1), ratio)
+	if factor.Sign() <= 0 {
+		return nil, errors.New("slippage factor must be positive")
+	}
+	num := new(big.Int).Mul(amount, factor.Num())
+	den := factor.Denom()
+	result := new(big.Int).Quo(num, den)
+	return result, nil
+}
+
+func applySlippageCeil(amount *big.Int, ratio *big.Rat) (*big.Int, error) {
+	if amount == nil {
+		return nil, errors.New("amount cannot be nil for slippage calculation")
+	}
+	if ratio == nil || ratio.Sign() == 0 {
+		return new(big.Int).Set(amount), nil
+	}
+	factor := new(big.Rat).Add(big.NewRat(1, 1), ratio)
+	num := new(big.Int).Mul(amount, factor.Num())
+	den := factor.Denom()
+	result, rem := new(big.Int).QuoRem(num, den, new(big.Int))
+	if rem.Sign() > 0 {
+		result.Add(result, big.NewInt(1))
+	}
+	return result, nil
 }
 
 func humanToFixed(amountStr string, decimals uint8) (*big.Int, error) {
@@ -126,6 +181,10 @@ type IntentInstruction struct {
 	// -- EDIT+1: A random thought, perhaps I can build the transaction and store it here. I don't actually need anything
 	// 	outside of DoIntent.
 	Amount          *big.Int
+	KnownAmount     *big.Int
+	MinAmountOut    *big.Int
+	MaxAmountIn     *big.Int
+	SlippagePct     float64
 	TokenInMint     solana.PublicKey
 	TokenOutMint    solana.PublicKey
 	TokenInVault    solana.PublicKey
@@ -189,6 +248,8 @@ type ConstantProduct struct {
 	TokenInReserve  *PoolBalance
 	TokenOutReserve *PoolBalance
 	TradeFeeRate    uint64
+	SlippageRatio   *big.Rat
+	SlippagePct     float64
 }
 
 func (cp ConstantProduct) tradeFeeNumerator() (int64, error) {
@@ -431,7 +492,25 @@ func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.Pool
 		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
 	}
 
-	instruction.Amount = quote
+	instruction.Amount = new(big.Int).Set(quote)
+	instruction.KnownAmount = new(big.Int).Set(knownAmount)
+	instruction.SlippagePct = cp.SlippagePct
+
+	switch instruction.Dir {
+	case SwapDirSell:
+		minOut, err := applySlippageFloor(quote, cp.SlippageRatio)
+		if err != nil {
+			return instruction, err
+		}
+		instruction.MinAmountOut = minOut
+	case SwapDirBuy:
+		maxIn, err := applySlippageCeil(quote, cp.SlippageRatio)
+		if err != nil {
+			return instruction, err
+		}
+		instruction.MaxAmountIn = maxIn
+	}
+
 	return instruction, nil
 }
 
@@ -500,6 +579,7 @@ func main() {
 		poolAddr       = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
 		intentLine     = flag.String("intent", "pay 100", "Intent and direction of the trade")
 		tokenAddr      = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
+		slippagePct    = flag.Float64("slippage", 0.5, "Slippage tolerance percentage (e.g. 0.5 for 0.5%)")
 		nonInteractive = flag.Bool("non-interactive", false, "Don't enter interactive mode (TUI), execute immediately")
 	)
 	flag.Parse()
@@ -551,6 +631,9 @@ func main() {
 		targetAddr:    targetAddr,
 		poolAddress:   *poolAddr,
 	}
+	if err := builder.SetSlippagePct(*slippagePct); err != nil {
+		log.Fatalf("invalid slippage: %s\n", err)
+	}
 
 	var intentMeta *IntentInstruction
 	if *nonInteractive {
@@ -594,9 +677,18 @@ func main() {
 	if intentMeta.Dir != SwapDirSell {
 		log.Fatalln("unsupported direction, currently attempting a max out transaction (swap_base_output)")
 	}
-	amountInU64 := intentMeta.Amount.Uint64()
-	// minOutU64 := minOut.Uint64()
-	swapIx, err := raydium_cp_swap.NewSwapBaseInputInstruction(amountInU64, amountInU64,
+	if intentMeta.KnownAmount == nil {
+		log.Fatalln("known amount missing for swap")
+	}
+	if intentMeta.MinAmountOut == nil {
+		log.Fatalln("minimum output amount missing for swap")
+	}
+	if !intentMeta.KnownAmount.IsUint64() || !intentMeta.MinAmountOut.IsUint64() {
+		log.Fatalln("amounts exceed uint64 range required by the program")
+	}
+	amountInU64 := intentMeta.KnownAmount.Uint64()
+	minOutU64 := intentMeta.MinAmountOut.Uint64()
+	swapIx, err := raydium_cp_swap.NewSwapBaseInputInstruction(amountInU64, minOutU64,
 		solana.Meta(payerPub).WRITE().SIGNER().PublicKey,
 		solana.Meta(auth).PublicKey,
 		solana.Meta(pool.AmmConfig).PublicKey,
