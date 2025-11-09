@@ -157,7 +157,7 @@ So, let's do it.
       error signal, both `balances` and `errs` have a length, they're allocated
       as `make(type, size where size = kConst)`. Not sure how to solve this at
       the moment, maybe I pull my `Any` slice helper from one of my projects?
-- [ ] Make a trade. ~~I have no idea how this will work out, I've been looking
+- [x] Make a trade. ~~I have no idea how this will work out, I've been looking
       over CP-Swap's source code and I see two swap instructions, one
       `swap_base_input` and one `swap_base_output`. The what, where, and why is
       unclear. I'll ask Preplexity for some pointers later.~~ Kind of an idea
