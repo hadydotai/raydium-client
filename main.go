@@ -21,7 +21,6 @@ import (
 )
 
 var (
-	CPMMProgramPubK  = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
 	ATAProgramID     = atapkg.ProgramID
 	SystemProgramID  = system.ProgramID
 	DefaultUnitLimit = uint32(200_000_000) // rough ballpark, https://solana.com/docs/core/fees and from simulating a few transactions
@@ -64,6 +63,11 @@ const (
 
 func fixedPointScale(decimals uint8) *big.Int {
 	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+}
+
+func init() {
+	// raydium_cp_swap.ProgramID = solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C")
+	raydium_cp_swap.ProgramID = solana.MustPublicKeyFromBase58("DRaycpLY18LhpbydsBWbVJtxpNv9oXPgjRSfpF2bWpYb")
 }
 
 func humanAmount(raw *big.Int, decimals uint8, precision int) string {
@@ -466,31 +470,37 @@ func makeATAIfMissing(ctx context.Context, c *rpc.Client, payer solana.PublicKey
 		return solana.PublicKey{}, nil, err
 	}
 
-	// Check existence:
-	ai, err := c.GetAccountInfo(ctx, ata)
+	var ixs []solana.Instruction
+	_, err = c.GetAccountInfoWithOpts(ctx, ata, &rpc.GetAccountInfoOpts{
+		Commitment: rpc.CommitmentProcessed,
+	})
 	if err != nil {
-		return solana.PublicKey{}, nil, err
+		if !errors.Is(err, rpc.ErrNotFound) {
+			return solana.PublicKey{}, nil, err
+		}
+	} else {
+		// account exists, nothing to do
+		return ata, nil, nil
 	}
 
-	var ixs []solana.Instruction
-	if ai == nil {
-		ix := atapkg.NewCreateInstruction(
-			payer,
-			owner,
-			mint,
-		).Build()
-		ixs = append(ixs, ix)
-	}
+	ix := atapkg.NewCreateInstruction(
+		payer,
+		owner,
+		mint,
+	).Build()
+	ixs = append(ixs, ix)
+
 	return ata, ixs, nil
 }
 
 func main() {
 	var (
-		hotwalletPath = flag.String("hotwallet", "", "Path to the hotwallet to use for signing transactions")
-		rpcEP         = flag.String("rpc", rpc.DevNet_RPC, "RPC to connect to")
-		poolAddr      = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
-		intentLine    = flag.String("intent", "pay 100", "Intent and direction of the trade")
-		tokenAddr     = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
+		hotwalletPath  = flag.String("hotwallet", "", "Path to the hotwallet to use for signing transactions")
+		rpcEP          = flag.String("rpc", rpc.DevNet_RPC, "RPC to connect to")
+		poolAddr       = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
+		intentLine     = flag.String("intent", "pay 100", "Intent and direction of the trade")
+		tokenAddr      = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
+		nonInteractive = flag.Bool("non-interactive", false, "Don't enter interactive mode (TUI), execute immediately")
 	)
 	flag.Parse()
 
@@ -541,32 +551,43 @@ func main() {
 		targetAddr:    targetAddr,
 		poolAddress:   *poolAddr,
 	}
-	ui := newTermUI(builder)
-	intentMeta, err := ui.Run(*intentLine)
-	if err != nil {
-		log.Fatalf("interactive UI failed: %s\n", err)
-	}
-	if intentMeta == nil { // user has chosen to reject or bailout
-		log.Println("Aborting...")
-		os.Exit(0)
+
+	var intentMeta *IntentInstruction
+	if *nonInteractive {
+		var report string
+		report, intentMeta, err = builder.Build(*intentLine)
+		if err != nil {
+			log.Fatalf("building intent report failed: %s\n", err)
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "%s", report)
+	} else {
+		ui := newTermUI(builder)
+		intentMeta, err = ui.Run(*intentLine)
+		if err != nil {
+			log.Fatalf("interactive UI failed: %s\n", err)
+		}
+		if intentMeta == nil { // user has chosen to reject or bailout
+			log.Println("Aborting...")
+			os.Exit(0)
+		}
 	}
 	// now we do the swap, finally.
 	payerPub := payer.PublicKey()
 	inATA, inATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenInMint)
 	if err != nil {
-		log.Fatalf("input ATA: %v", err)
+		log.Fatalf("attempts to get/make ATA for input token failed: %s\n", err)
 	}
 	outATA, outATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenOutMint)
 	if err != nil {
-		log.Fatalf("output ATA: %v", err)
+		log.Fatalf("attempts to get/make ATA for output token failed: %s\n", err)
 	}
 
 	auth, _, err := solana.FindProgramAddress(
 		[][]byte{[]byte("vault_and_lp_mint_auth_seed")}, // https://github.com/raydium-io/raydium-cp-swap/blob/master/programs/cp-swap/src/lib.rs#L43
-		CPMMProgramPubK,
+		raydium_cp_swap.ProgramID,
 	)
 	if err != nil {
-		log.Fatalf("authority PDA: %v", err)
+		log.Fatalf("rpc call findProgramAddress failed: %s \n", err)
 	}
 	// TODO(@hadydotai): Here I need to check for the direction because the entire instruction will likely change, so I guess let's guard against it now
 	// and deal with it later.
@@ -606,7 +627,7 @@ func main() {
 
 	recent, err := client.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
 	if err != nil {
-		log.Fatalf("blockhash: %v", err)
+		log.Fatalf("rpc call getLatestBlockhash failed: %s\n", err)
 	}
 	tx, err := solana.NewTransaction(
 		ixs,
@@ -614,7 +635,7 @@ func main() {
 		solana.TransactionPayer(payerPub),
 	)
 	if err != nil {
-		log.Fatalf("tx build: %v", err)
+		log.Fatalf("building transaction failed: %s\n", err)
 	}
 	if _, err := tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
 		if key.Equals(payerPub) {
@@ -622,12 +643,12 @@ func main() {
 		}
 		return nil
 	}); err != nil {
-		log.Fatalf("sign: %v", err)
+		log.Fatalf("signing transaction failed: %s\n", err)
 	}
 
 	sig, err := client.SendTransaction(ctx, tx)
 	if err != nil {
-		log.Fatalf("send: %v", err)
+		log.Fatalf("sending transaction failed: %s\n", err.Error())
 	}
 	log.Println("Tx: ", sig.String())
 }
