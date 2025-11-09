@@ -11,10 +11,10 @@
             "mode": "auto",
             "program": "${workspaceFolder}",
             "args": [
-                "-pool", "EgsP6K6a1CmAnQKjkP6SuF3oVrnaRAWp2oVHfhuXbNRj",
-                // "-token", "USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT",
-                "-token", "4JEEEi2UcGTieLVmRU7u4qupCY1RrgaixSCFzMq9KBNA",
-                "-intent", "buy 1005"
+                "-pool", "5Eu2G2USTy1pqphmQzQ2SBXWrBq5sdhgEh7hso9R2xix", 
+                "-token", "So11111111111111111111111111111111111111112",
+                "-intent","pay 0.23",
+                "-non-interactive"
             ],
         }
     ]
