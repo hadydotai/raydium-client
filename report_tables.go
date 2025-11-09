@@ -7,7 +7,6 @@ import (
 	"hadydotai/raydium-client/raydium_cp_swap"
 	"math/big"
 	"strings"
-	"sync"
 
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -22,7 +21,6 @@ type TableBuilder struct {
 	poolAmmConfig *raydium_cp_swap.AmmConfig
 	targetAddr    Addr
 	poolAddress   string
-	slippageMu    sync.RWMutex
 	slippagePct   float64
 	slippageRat   *big.Rat
 }
@@ -32,16 +30,12 @@ func (tb *TableBuilder) SetSlippagePct(pct float64) error {
 	if err != nil {
 		return err
 	}
-	tb.slippageMu.Lock()
 	tb.slippagePct = pct
 	tb.slippageRat = rat
-	tb.slippageMu.Unlock()
 	return nil
 }
 
 func (tb *TableBuilder) slippage() (float64, *big.Rat) {
-	tb.slippageMu.RLock()
-	defer tb.slippageMu.RUnlock()
 	var ratioCopy *big.Rat
 	if tb.slippageRat != nil {
 		ratioCopy = new(big.Rat).Set(tb.slippageRat)
