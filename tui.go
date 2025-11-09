@@ -313,11 +313,7 @@ func (ui *termUI) statusLine() string {
 func (ui *termUI) promptLine() string {
 	switch ui.mode {
 	case modePrompt:
-		label := ">"
-		if ui.promptKind == promptKindSlippage {
-			label = "> slippage"
-		}
-		return label + " " + string(ui.promptBuffer)
+		return "> " + string(ui.promptBuffer)
 	default:
 		if ui.busy {
 			return "> ..."
