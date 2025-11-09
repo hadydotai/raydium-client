@@ -17,7 +17,9 @@ import (
 	atapkg "github.com/gagliardetto/solana-go/programs/associated-token-account"
 	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
 	"github.com/gagliardetto/solana-go/programs/system"
+	tokenprog "github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
 )
 
 var (
@@ -56,6 +58,8 @@ const (
 	ourCorePoolAddr Addr = "3ELLbDZkimZSpnWoWVAfDzeG24yi2LC4sB35ttfNCoEi"
 	feeRateDenom         = int64(1_000_000) // https://github.com/raydium-io/raydium-cp-swap/blob/master/programs/cp-swap/src/curve/fees.rs#L3
 )
+
+var wSOLMint = solana.MustPublicKeyFromBase58(string(wSOLMintAddr))
 
 type SwapDir uint8
 
@@ -110,6 +114,26 @@ func makeSlippageRatio(percent float64) (*big.Rat, error) {
 	}
 	ratio := new(big.Rat).SetFloat64(percent / 100)
 	return ratio, nil
+}
+
+func isNativeSOL(mint solana.PublicKey) bool {
+	return mint.Equals(wSOLMint)
+}
+
+func isAccountMissingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, rpc.ErrNotFound) {
+		return true
+	}
+	var rpcErr *jsonrpc.RPCError
+	if errors.As(err, &rpcErr) {
+		if rpcErr.Code == -32602 || strings.Contains(strings.ToLower(rpcErr.Message), "could not find account") {
+			return true
+		}
+	}
+	return false
 }
 
 func applySlippageFloor(amount *big.Int, ratio *big.Rat) (*big.Int, error) {
@@ -554,7 +578,7 @@ func makeATAIfMissing(ctx context.Context, c *rpc.Client, payer solana.PublicKey
 		Commitment: rpc.CommitmentProcessed,
 	})
 	if err != nil {
-		if !errors.Is(err, rpc.ErrNotFound) {
+		if !isAccountMissingErr(err) {
 			return solana.PublicKey{}, nil, err
 		}
 	} else {
@@ -570,6 +594,41 @@ func makeATAIfMissing(ctx context.Context, c *rpc.Client, payer solana.PublicKey
 	ixs = append(ixs, ix)
 
 	return ata, ixs, nil
+}
+
+func wrapNativeIfNeeded(ctx context.Context, c *rpc.Client, owner solana.PublicKey, ata solana.PublicKey, mint solana.PublicKey, required *big.Int) ([]solana.Instruction, error) {
+	if required == nil || required.Sign() <= 0 {
+		return nil, nil
+	}
+	if !isNativeSOL(mint) {
+		return nil, nil
+	}
+	if !required.IsUint64() {
+		return nil, fmt.Errorf("required native amount exceeds uint64")
+	}
+	deficit := new(big.Int).Set(required)
+	balance, err := c.GetTokenAccountBalance(ctx, ata, rpc.CommitmentProcessed)
+	if err != nil {
+		if !isAccountMissingErr(err) {
+			return nil, err
+		}
+	} else if balance != nil && balance.Value != nil {
+		if existing, ok := new(big.Int).SetString(balance.Value.Amount, 10); ok {
+			deficit.Sub(deficit, existing)
+			if deficit.Sign() <= 0 {
+				return nil, nil
+			}
+		}
+	}
+	if !deficit.IsUint64() {
+		return nil, fmt.Errorf("wrap deficit exceeds uint64")
+	}
+	lamports := deficit.Uint64()
+	wrapIxs := []solana.Instruction{
+		system.NewTransferInstruction(lamports, owner, ata).Build(),
+		tokenprog.NewSyncNativeInstruction(ata).Build(),
+	}
+	return wrapIxs, nil
 }
 
 func main() {
@@ -711,10 +770,16 @@ func main() {
 	cb1 := computebudget.NewSetComputeUnitLimitInstruction(uint32(DefaultUnitLimit)).Build()
 	cb2 := computebudget.NewSetComputeUnitPriceInstruction(DefaultUnitPrice).Build()
 
+	wrapIxs, err := wrapNativeIfNeeded(ctx, client, payerPub, inATA, intentMeta.TokenInMint, intentMeta.KnownAmount)
+	if err != nil {
+		log.Fatalf("wrapping native token failed: %s\n", err)
+	}
+
 	var ixs []solana.Instruction
 	ixs = append(ixs, cb1, cb2)
 	ixs = append(ixs, inATAixs...)
 	ixs = append(ixs, outATAixs...)
+	ixs = append(ixs, wrapIxs...)
 	ixs = append(ixs, swapIx)
 
 	recent, err := client.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
