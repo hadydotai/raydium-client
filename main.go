@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"hadydotai/raydium-client/raydium_cp_swap"
 
@@ -647,7 +648,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load private key from hot wallet: %s\n", err)
 	}
-	_ = payer
 
 	poolPubK, err := solana.PublicKeyFromBase58(*poolAddr)
 	if err != nil {
@@ -656,8 +656,20 @@ func main() {
 
 	client := rpc.New(*rpcEP)
 
-	// NOTE(@hadydotai): We'll time this out in the future
-	ctx := context.Background()
+	// NOTE(@hadydotai): A latest blockhash transaction will likely invalidate in anycase after about a minute,
+	// so this leaves us with about 2 minutes of working time, if our RPC node is that slow, then we've got a problem.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// NOTE(@hadydotai): So, here we're getting the pool that's been passed in, but we need to figure out if we dont have a pool passed in
+	// to actually get all the pools from Raydium's CPMM program. In anycase, I think what I'd like to actually be doing is
+	// fetching all the pools from CPMM program, creating a Set out of the mint addresses and then hitting metaplex token metadata
+	// program to get the symbols. Cache the symbols and the pools in a database.
+	//
+	// I suppose the next point is, when do I update. Well, I reckon without chewing on glass for too long, I'll just trigger a lazy
+	// update when the user is asking for something that I don't have, ideally this would not be the case, we'd load up the
+	// data once, websocket connect and run an indexer. I see the bridge, not crossing it right now.
+
 	accountInfo, err := client.GetAccountInfoWithOpts(ctx, poolPubK, &rpc.GetAccountInfoOpts{Encoding: solana.EncodingBase64})
 	if err != nil {
 		log.Fatalf("rpc call getAccountInfo for Pool failed, check if the RPC endpoint is valid, or if you're being limited: %s\n", err)
