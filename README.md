@@ -33,12 +33,12 @@ tar xvf raydium-client-0.0.1-alpha-linux-amd64.tar.gz
 
 ### Quick Start
 
-1. **Hot wallet** export a Solana keypair file (e.g. from `solana-keygen`) and
+1. **Hot wallet**: export a Solana keypair file (e.g. from `solana-keygen`) and
    note the absolute path.
-2. **Pick a pool** browse
+2. **Pick a pool**: browse
    [raydium.io/liquidity-pools](https://raydium.io/liquidity-pools/?tab=standard),
    hover any CPMM/CP-Swap pool, and copy the on-chain pool address.
-3. **Run the CLI** – at minimum you must pass `-hotwallet`, `-pool`. You should
+3. **Run the CLI**: at minimum you must pass `-hotwallet`, `-pool`. You should
    also pass an `-intent`, although it's not required when starting in the
    _interactive_, it's nicer.
 
