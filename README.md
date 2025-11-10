@@ -12,10 +12,22 @@ CLI.
 
 ## Install
 
+There's releases available on Github for all three platforms, windows, linux,
+and mac. I'm a Linux/Windows user so naturally this got tested on both of these
+platforms. I don't own a mac, so if you try it and run into any issues, feel
+free to open an issue and I'll see if I can get it resolved.
+
+For a quick run here's the latest release on linux:
+
 ```shell
+wget https://github.com/hadydotai/raydium-client/releases/download/0.0.0-alpha/raydium-client-0.0.0-alpha-linux-amd64.tar.gz
+tar xvf raydium-client-0.0.0-alpha-linux-amd64.tar.gz
+./raydium-client-0.0.0-alpha --help
 ```
 
 ## How to use
+
+You'll need
 
 ## Limitiations
 

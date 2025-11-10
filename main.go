@@ -27,6 +27,7 @@ import (
 
 const (
 	RaydiumProgramID = iota
+	DefaultRPC
 )
 
 const (
@@ -42,12 +43,14 @@ var (
 
 	wSOLMint = solana.MustPublicKeyFromBase58(string(wSOLMintAddr))
 
-	networks = map[string]map[int]solana.PublicKey{
+	networks = map[string]map[int]any{
 		"devnet": {
 			RaydiumProgramID: solana.MustPublicKeyFromBase58("DRaycpLY18LhpbydsBWbVJtxpNv9oXPgjRSfpF2bWpYb"),
+			DefaultRPC:       rpc.DevNet_RPC,
 		},
 		"mainnet": {
 			RaydiumProgramID: solana.MustPublicKeyFromBase58("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"),
+			DefaultRPC:       rpc.MainNetBeta_RPC,
 		},
 	}
 )
@@ -354,8 +357,10 @@ func main() {
 	)
 	flag.Parse()
 
-	raydium_cp_swap.ProgramID = networks[*network][RaydiumProgramID]
-
+	raydium_cp_swap.ProgramID = networks[*network][RaydiumProgramID].(solana.PublicKey)
+	if len(*rpcEP) == 0 {
+		*rpcEP = networks[*network][DefaultRPC].(string)
+	}
 	client := rpc.New(*rpcEP)
 
 	// NOTE(@hadydotai): A latest blockhash transaction will likely invalidate in anycase after about a minute,
