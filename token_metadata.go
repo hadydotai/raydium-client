@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/gagliardetto/solana-go"
@@ -115,7 +114,7 @@ Alright so, preamble yapped out. Until I give a face lift to the code, these are
    | name (borsh string)  | symbol (borsh string)| uri (borsh string)     |
    +----------------------+----------------------+------------------------+
    | additional metadata: repeated (borsh string key, borsh string value) |
-   +---------------------------------------------------------------------+
+   +----------------------------------------------------------------------+
 
 2) Token-2022 mint with canonical padding (82B mint promoted to 165B):
    +----------------+--------------------------+-----------------+----------------------+
@@ -135,9 +134,11 @@ Alright so, preamble yapped out. Until I give a face lift to the code, these are
 
 4) Extensions:
    a) MetadataPointer (fixed 64B payload)
-      +------------------------------+------------------------------+
-      | authority OptionalNonZeroPk  | metadata_address OptionalPk  |
-      +------------------------------+------------------------------+
+      +------------------------------+
+      | authority OptionalNonZeroPk  |
+	  +------------------------------+
+	  | metadata_address OptionalPk  |
+      +------------------------------+
 
    b) TokenMetadata (variable-length Borsh)
       +----------------------------+
@@ -548,7 +549,6 @@ func tokenMetadata(ctx context.Context, client *rpc.Client, mint solana.PublicKe
 	owner := res.Value.Owner
 	switch owner.String() {
 	case solana.Token2022ProgramID.String():
-		log.Println("token2022")
 		return parseToken2022Metadata(ctx, client, mint, data)
 	case solana.TokenProgramID.String():
 		return parseMetaplexMetadata(ctx, client, mint)
