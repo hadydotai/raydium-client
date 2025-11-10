@@ -59,6 +59,7 @@ type termUI struct {
 	intentMeta      *IntentInstruction
 	cursorVisible   bool
 	tableFlashUntil time.Time
+	lastTable       string
 }
 
 func newTermUI(builder *TableBuilder) *termUI {
@@ -70,9 +71,9 @@ func newTermUI(builder *TableBuilder) *termUI {
 	}
 }
 
-func (ui *termUI) Run(initialIntent string) (*IntentInstruction, error) {
+func (ui *termUI) Run(initialIntent string) (*IntentInstruction, string, error) {
 	if err := termbox.Init(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer termbox.Close()
 	defer close(ui.done)
@@ -92,7 +93,7 @@ func (ui *termUI) Run(initialIntent string) (*IntentInstruction, error) {
 		case ev := <-eventCh:
 			switch ev.Type {
 			case termbox.EventError:
-				return nil, ev.Err
+				return nil, "", ev.Err
 			case termbox.EventResize:
 				continue
 			case termbox.EventKey:
@@ -107,9 +108,9 @@ func (ui *termUI) Run(initialIntent string) (*IntentInstruction, error) {
 						// and fix the wrong semantic source than cover for it here defensively.
 						panic("we shouldn't be here, NOOP + true means something went wrong in handleKey")
 					case userDecisionReject, userDecisionBailout:
-						return nil, nil
+						return nil, "", nil
 					default:
-						return ui.intentMeta, nil
+						return ui.intentMeta, ui.lastTable, nil
 					}
 				}
 			}
@@ -117,6 +118,7 @@ func (ui *termUI) Run(initialIntent string) (*IntentInstruction, error) {
 			ui.busy = false
 			ui.spinnerFrame = 0
 			ui.intentMeta = res.intentMeta
+			ui.lastTable = res.table
 			if res.intentMeta != nil {
 				ui.currentIntent = res.intentMeta.String()
 			}

@@ -753,9 +753,9 @@ func main() {
 		log.Fatalf("invalid slippage: %s\n", err)
 	}
 
+	var report string
 	var intentMeta *IntentInstruction
 	if *nonInteractive {
-		var report string
 		report, intentMeta, err = builder.Build(initialIntent)
 		if err != nil {
 			log.Fatalf("building intent report failed: %s\n", err)
@@ -763,13 +763,16 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stdout, "%s", report)
 	} else {
 		ui := newTermUI(builder)
-		intentMeta, err = ui.Run(initialIntent)
+		intentMeta, report, err = ui.Run(initialIntent)
 		if err != nil {
 			log.Fatalf("interactive UI failed: %s\n", err)
 		}
 		if intentMeta == nil { // user has chosen to reject or bailout
 			log.Println("Aborting...")
 			os.Exit(0)
+		}
+		if report != "" {
+			fmt.Fprintln(os.Stdout, report)
 		}
 	}
 	// now we do the swap, finally.
