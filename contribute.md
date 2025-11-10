@@ -30,12 +30,12 @@ generate some binding in Go for that IDL (so we don't have to do any bit mapping
 ourselves, or need to figure out how to correctly construct Raydium's
 instructions)
 
-I've included [raydium_cp_swap.json](./raydium_cp_swap.json), which is the IDL
-for Raydium CP-Swap program (CPMM pools), that was generated with the `anchor`
-CLI.
+I've included [raydium_cp_swap.json](./idls/raydium_cp_swap.json), which is the
+IDL for Raydium CP-Swap program (CPMM pools), that was generated with the
+`anchor` CLI.
 
 ```shell
-anchor idl fetch -o raydium_cp_swap.json CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C
+anchor idl fetch -o ./idls/raydium_cp_swap.json CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C
 ```
 
 <details>
@@ -65,7 +65,7 @@ this is done through `anchor-go`.
 # first get it
 go get -tool github.com/gagliardetto/anchor-go
 # then use it
-go tool anchor-go -idl ./raydium_cp_swap.json -output ./raydium_cp_swap -program-id CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C
+go tool anchor-go -idl ./idls/raydium_cp_swap.json -output ./raydium_cp_swap -program-id CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C
 ```
 
 Before moving on, we remove the `go.mod` and `go.sum` files from the generated
