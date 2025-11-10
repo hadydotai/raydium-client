@@ -357,6 +357,17 @@ func main() {
 	)
 	flag.Parse()
 
+	validations := []FlagSpec{
+		{Name: "rpc", Value: rpcEP, Rules: []FlagRule{Requires("network")}},
+		{Name: "network", Value: network, Rules: []FlagRule{NotEmpty(), OneOf("mainnet", "devnet")}},
+		{Name: "hotwallet", Value: hotwalletPath, Rules: []FlagRule{NotEmpty()}},
+		{Name: "pool", Value: poolAddr, Rules: []FlagRule{NotEmpty()}},
+	}
+	if *noTUI {
+		validations = append(validations, FlagSpec{Name: "intent", Value: intentLine, Rules: []FlagRule{NotEmpty()}})
+	}
+	ValidateConfigOrExit(flag.CommandLine, validations)
+
 	raydium_cp_swap.ProgramID = networks[*network][RaydiumProgramID].(solana.PublicKey)
 	if len(*rpcEP) == 0 {
 		*rpcEP = networks[*network][DefaultRPC].(string)
