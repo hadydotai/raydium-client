@@ -1,6 +1,6 @@
 # Raydium Client
 
-<script src="https://asciinema.org/a/754990.js" id="asciicast-754990" async="true"></script>
+<a href="https://asciinema.org/a/754990" target="_blank"><img src="https://asciinema.org/a/754990.svg" /></a>
 
 Raydium client is a small CLI application to interact with Raydium, specifically
 around swapping between tokens using Raydium's CPMM/CP-Swap pools.
