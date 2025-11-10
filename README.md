@@ -38,12 +38,12 @@ tar xvf raydium-client-0.0.1-alpha-linux-amd64.tar.gz
 2. **Pick a pool** – browse
    [raydium.io/liquidity-pools](https://raydium.io/liquidity-pools/?tab=standard),
    hover any CPMM/CP-Swap pool, and copy the on-chain pool address.
-3. **Run the CLI** – at minimum you must pass `--hotwallet`, `--pool`, and a
-   network. Example (interactive/default mode):
+3. **Run the CLI** – at minimum you must pass `--hotwallet`, `--pool`.
+
+Example (interactive/default mode):
 
 ```shell
 raydium-client-0.0.1-alpha \
-  --network devnet \
   --hotwallet ~/.config/solana/devnet.json \
   --pool <poolID>
 ```
@@ -109,7 +109,7 @@ Combine these with `--no-tui` for automation. Example batch run:
 
 ```shell
 raydium-client-0.0.1-alpha \
-  --network mainnet \
+  --network devnet \
   --rpc https://your.custom.rpc \
   --hotwallet ~/.config/solana/hot.json \
   --pool <poolID> \
