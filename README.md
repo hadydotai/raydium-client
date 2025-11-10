@@ -51,7 +51,7 @@ raydium-client-0.0.1-alpha \
   -pool <poolID>
 ```
 
-You will land in the TUI, see live pool balances, and be prompted for an intent
+You will land in the TUI, see current pool balances, and be prompted for an intent
 (see **Intent DSL** below).
 
 ### Modes
