@@ -21,6 +21,7 @@ import (
 	tokenprog "github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
+	"github.com/jedib0t/go-pretty/v6/table"
 )
 
 var (
@@ -240,17 +241,19 @@ type IntentInstruction struct {
 	// addresses are, ...etc. Perhaps it's par for the course, and it's okay to keep it here.
 	// -- EDIT+1: A random thought, perhaps I can build the transaction and store it here. I don't actually need anything
 	// 	outside of DoIntent.
-	Amount          *big.Int
-	KnownAmount     *big.Int
-	MinAmountOut    *big.Int
-	MaxAmountIn     *big.Int
-	SlippagePct     float64
-	TokenInMint     solana.PublicKey
-	TokenOutMint    solana.PublicKey
-	TokenInVault    solana.PublicKey
-	TokenOutVault   solana.PublicKey
-	TokenInProgram  solana.PublicKey
-	TokenOutProgram solana.PublicKey
+	Amount           *big.Int
+	KnownAmount      *big.Int
+	MinAmountOut     *big.Int
+	MaxAmountIn      *big.Int
+	SlippagePct      float64
+	TokenInMint      solana.PublicKey
+	TokenOutMint     solana.PublicKey
+	TokenInVault     solana.PublicKey
+	TokenOutVault    solana.PublicKey
+	TokenInProgram   solana.PublicKey
+	TokenOutProgram  solana.PublicKey
+	TokenInDecimals  uint8
+	TokenOutDecimals uint8
 }
 
 func (ii *IntentInstruction) String() string {
@@ -518,6 +521,7 @@ func (cp ConstantProduct) DoIntent(instruction *IntentInstruction, pool *raydium
 			instruction.TokenInMint, instruction.TokenOutMint = pool.Token1Mint, pool.Token0Mint
 			instruction.TokenInVault, instruction.TokenOutVault = pool.Token1Vault, pool.Token0Vault
 			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token1Program, pool.Token0Program
+			instruction.TokenInDecimals, instruction.TokenOutDecimals = balances[1].Decimals, balances[0].Decimals
 		} else {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[1].Decimals)
 			if err != nil {
@@ -527,6 +531,7 @@ func (cp ConstantProduct) DoIntent(instruction *IntentInstruction, pool *raydium
 			instruction.TokenInMint, instruction.TokenOutMint = pool.Token0Mint, pool.Token1Mint
 			instruction.TokenInVault, instruction.TokenOutVault = pool.Token0Vault, pool.Token1Vault
 			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token0Program, pool.Token1Program
+			instruction.TokenInDecimals, instruction.TokenOutDecimals = balances[0].Decimals, balances[1].Decimals
 		}
 		quote, err = cp.QuoteIn(knownAmount)
 		if err != nil {
@@ -542,6 +547,7 @@ func (cp ConstantProduct) DoIntent(instruction *IntentInstruction, pool *raydium
 			instruction.TokenInMint, instruction.TokenOutMint = pool.Token0Mint, pool.Token1Mint
 			instruction.TokenInVault, instruction.TokenOutVault = pool.Token0Vault, pool.Token1Vault
 			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token0Program, pool.Token1Program
+			instruction.TokenInDecimals, instruction.TokenOutDecimals = balances[0].Decimals, balances[1].Decimals
 		} else {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[1].Decimals)
 			if err != nil {
@@ -551,6 +557,7 @@ func (cp ConstantProduct) DoIntent(instruction *IntentInstruction, pool *raydium
 			instruction.TokenInMint, instruction.TokenOutMint = pool.Token1Mint, pool.Token0Mint
 			instruction.TokenInVault, instruction.TokenOutVault = pool.Token1Vault, pool.Token0Vault
 			instruction.TokenInProgram, instruction.TokenOutProgram = pool.Token1Program, pool.Token0Program
+			instruction.TokenInDecimals, instruction.TokenOutDecimals = balances[1].Decimals, balances[0].Decimals
 		}
 		quote, err = cp.QuoteOut(knownAmount)
 		if err != nil {
@@ -678,6 +685,169 @@ func wrapNativeIfNeeded(ctx context.Context, c *rpc.Client, owner solana.PublicK
 	return wrapIxs, nil
 }
 
+type txSummaryData struct {
+	Signature        solana.Signature
+	Status           string
+	FeeLamports      uint64
+	PaidAmount       *big.Int
+	PaidDecimals     uint8
+	PaidSymbol       string
+	ReceivedAmount   *big.Int
+	ReceivedDecimals uint8
+	ReceivedSymbol   string
+}
+
+func renderTxSummary(data txSummaryData) string {
+	builder := &strings.Builder{}
+	t := table.NewWriter()
+	t.SetOutputMirror(builder)
+	t.SetTitle("Swap Result")
+	t.AppendHeader(table.Row{"Field", "Value"})
+	t.AppendRow(table.Row{"Signature", data.Signature.String()})
+	status := data.Status
+	if status == "" {
+		status = "pending"
+	}
+	t.AppendRow(table.Row{"Status", strings.ToUpper(status)})
+	t.AppendRow(table.Row{"Paid", formatTokenAmount(data.PaidAmount, data.PaidDecimals, data.PaidSymbol)})
+	t.AppendRow(table.Row{"Received", formatTokenAmount(data.ReceivedAmount, data.ReceivedDecimals, data.ReceivedSymbol)})
+	feeStr := "n/a"
+	if data.FeeLamports > 0 {
+		feeStr = formatLamports(data.FeeLamports)
+	}
+	t.AppendRow(table.Row{"Fee", feeStr})
+	t.Render()
+	return builder.String()
+}
+
+func formatTokenAmount(amount *big.Int, decimals uint8, symbol string) string {
+	if amount == nil {
+		return "n/a"
+	}
+	precision := int(decimals)
+	if precision > 8 {
+		precision = 8
+	}
+	if precision < 2 {
+		precision = 2
+	}
+	return fmt.Sprintf("%s %s", humanAmount(amount, decimals, precision), symbol)
+}
+
+func formatLamports(lamports uint64) string {
+	val := new(big.Int).SetUint64(lamports)
+	return fmt.Sprintf("%s SOL", humanAmount(val, 9, 9))
+}
+
+func chooseDecimals(primary uint8, fallback uint8) uint8 {
+	if primary != 0 {
+		return primary
+	}
+	return fallback
+}
+
+func tokenBalanceAmount(balances []rpc.TokenBalance, accountIndex int, mint solana.PublicKey) (*big.Int, uint8, bool) {
+	for _, bal := range balances {
+		if int(bal.AccountIndex) != accountIndex {
+			continue
+		}
+		if !bal.Mint.Equals(mint) {
+			continue
+		}
+		amount, ok := new(big.Int).SetString(bal.UiTokenAmount.Amount, 10)
+		if !ok {
+			return nil, 0, false
+		}
+		return amount, bal.UiTokenAmount.Decimals, true
+	}
+	return nil, 0, false
+}
+
+func tokenDeltaFromResult(result *rpc.GetTransactionResult, account solana.PublicKey, mint solana.PublicKey) (*big.Int, uint8, bool) {
+	if result == nil || result.Meta == nil || result.Transaction == nil {
+		return nil, 0, false
+	}
+	tx, err := result.Transaction.GetTransaction()
+	if err != nil || tx == nil {
+		return nil, 0, false
+	}
+	accountIndex := -1
+	for i, key := range tx.Message.AccountKeys {
+		if key.Equals(account) {
+			accountIndex = i
+			break
+		}
+	}
+	if accountIndex == -1 {
+		return nil, 0, false
+	}
+	pre, decs, hasPre := tokenBalanceAmount(result.Meta.PreTokenBalances, accountIndex, mint)
+	post, _, hasPost := tokenBalanceAmount(result.Meta.PostTokenBalances, accountIndex, mint)
+	if !hasPre && !hasPost {
+		return nil, 0, false
+	}
+	if !hasPre {
+		pre = big.NewInt(0)
+	}
+	if !hasPost {
+		post = big.NewInt(0)
+	}
+	delta := new(big.Int).Sub(post, pre)
+	return delta, decs, true
+}
+
+func waitForTransactionResult(ctx context.Context, client *rpc.Client, sig solana.Signature) (string, *rpc.GetTransactionResult, error) {
+	status := "pending"
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		select {
+		case <-waitCtx.Done():
+			return status, nil, waitCtx.Err()
+		default:
+			resp, err := client.GetTransaction(waitCtx, sig, &rpc.GetTransactionOpts{
+				Encoding:   solana.EncodingBase64,
+				Commitment: rpc.CommitmentConfirmed,
+			})
+			if err != nil {
+				if errors.Is(err, rpc.ErrNotFound) {
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+				return status, nil, err
+			}
+			status = deriveSignatureStatus(waitCtx, client, sig, resp)
+			return status, resp, nil
+		}
+	}
+}
+
+func deriveSignatureStatus(ctx context.Context, client *rpc.Client, sig solana.Signature, result *rpc.GetTransactionResult) string {
+	if result != nil && result.Meta != nil && result.Meta.Err != nil {
+		return "failed"
+	}
+	resp, err := client.GetSignatureStatuses(ctx, false, sig)
+	if err != nil || resp == nil || len(resp.Value) == 0 || resp.Value[0] == nil {
+		if result != nil && result.Meta != nil && result.Meta.Err == nil {
+			return "confirmed"
+		}
+		return "pending"
+	}
+	val := resp.Value[0]
+	if val.Err != nil {
+		return "failed"
+	}
+	switch val.ConfirmationStatus {
+	case rpc.ConfirmationStatusFinalized:
+		return "finalized"
+	case rpc.ConfirmationStatusConfirmed:
+		return "confirmed"
+	case rpc.ConfirmationStatusProcessed:
+		return "processed"
+	default:
+		return string(val.ConfirmationStatus)
+	}
+}
 func main() {
 	var (
 		hotwalletPath  = flag.String("hotwallet", "", "Path to the hotwallet to use for signing transactions")
@@ -882,4 +1052,44 @@ func main() {
 		log.Fatalf("sending transaction failed: %s\n", err.Error())
 	}
 	log.Println("Tx: ", sig.String())
+	status, txResult, waitErr := waitForTransactionResult(ctx, client, sig)
+	if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) && !errors.Is(waitErr, context.Canceled) {
+		log.Printf("warning: waiting for transaction confirmation failed: %v", waitErr)
+	}
+	var txMeta *rpc.TransactionMeta
+	if txResult != nil {
+		txMeta = txResult.Meta
+	}
+	feeLamports := uint64(0)
+	if txMeta != nil {
+		feeLamports = txMeta.Fee
+	}
+	var paidDelta, receivedDelta *big.Int
+	var paidDecimals, receivedDecimals uint8
+	if delta, decs, ok := tokenDeltaFromResult(txResult, intentMeta.TokenInVault, intentMeta.TokenInMint); ok {
+		if delta.Sign() < 0 {
+			delta.Neg(delta)
+		}
+		paidDelta = delta
+		paidDecimals = decs
+	}
+	if delta, decs, ok := tokenDeltaFromResult(txResult, intentMeta.TokenOutVault, intentMeta.TokenOutMint); ok {
+		if delta.Sign() > 0 {
+			delta = new(big.Int).Neg(delta)
+		}
+		receivedDelta = new(big.Int).Abs(delta)
+		receivedDecimals = decs
+	}
+	summary := renderTxSummary(txSummaryData{
+		Signature:        sig,
+		Status:           status,
+		FeeLamports:      feeLamports,
+		PaidAmount:       paidDelta,
+		PaidDecimals:     chooseDecimals(paidDecimals, intentMeta.TokenInDecimals),
+		PaidSymbol:       builder.symbolForMint(intentMeta.TokenInMint),
+		ReceivedAmount:   receivedDelta,
+		ReceivedDecimals: chooseDecimals(receivedDecimals, intentMeta.TokenOutDecimals),
+		ReceivedSymbol:   builder.symbolForMint(intentMeta.TokenOutMint),
+	})
+	fmt.Fprintln(os.Stdout, summary)
 }
