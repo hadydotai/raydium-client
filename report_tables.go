@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"hadydotai/raydium-client/raydium_cp_swap"
 	"math/big"
-	"sort"
 	"strings"
+	"sync"
 
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -16,16 +16,17 @@ import (
 )
 
 type TableBuilder struct {
-	ctx           context.Context
-	client        *rpc.Client
-	pool          *raydium_cp_swap.PoolState
-	poolAmmConfig *raydium_cp_swap.AmmConfig
-	poolAddress   string
-	slippagePct   float64
-	slippageRat   *big.Rat
-	tokenOrder    []solana.PublicKey
-	mintToSymbol  map[string]string
-	symbolToMint  map[string]solana.PublicKey
+	ctx               context.Context
+	client            *rpc.Client
+	pool              *raydium_cp_swap.PoolState
+	poolAmmConfig     *raydium_cp_swap.AmmConfig
+	poolAddress       string
+	poolPubKey        solana.PublicKey
+	slippagePct       float64
+	slippageRat       *big.Rat
+	tokenOrder        []solana.PublicKey
+	symm              SymbolMapping
+	userSymbolAliases map[string]solana.PublicKey
 }
 
 func (tb *TableBuilder) SetSlippagePct(pct float64) error {
@@ -48,49 +49,19 @@ func (tb *TableBuilder) slippage() (float64, *big.Rat) {
 	return tb.slippagePct, ratioCopy
 }
 
-func (tb *TableBuilder) symbolForMint(m solana.PublicKey) string {
-	if tb.mintToSymbol == nil {
-		return Addr(m.String()).String()
-	}
-	if sym, ok := tb.mintToSymbol[m.String()]; ok && sym != "" {
-		return sym
-	}
-	return Addr(m.String()).String()
-}
-
-func (tb *TableBuilder) availableSymbols() []string {
-	syms := make([]string, 0, len(tb.symbolToMint))
-	for sym := range tb.symbolToMint {
-		syms = append(syms, sym)
-	}
-	sort.Strings(syms)
-	return syms
-}
-
-func (tb *TableBuilder) resolveMintForSymbol(symbol string) (solana.PublicKey, error) {
-	if tb.symbolToMint == nil {
-		return solana.PublicKey{}, errors.New("token directory unavailable")
-	}
-	symKey := strings.ToUpper(strings.TrimSpace(symbol))
-	if symKey == "" {
-		return solana.PublicKey{}, errors.New("token symbol cannot be empty")
-	}
-	if mint, ok := tb.symbolToMint[symKey]; ok {
-		return mint, nil
-	}
-	return solana.PublicKey{}, fmt.Errorf("unknown token symbol %s (available: %s)", symbol, strings.Join(tb.availableSymbols(), ", "))
-}
-
-func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, error) {
+func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 	instruction, err := parseIntent(intentLine)
 	if err != nil {
 		return "", nil, err
 	}
-	targetMint, err := tb.resolveMintForSymbol(instruction.TargetSymbol)
-	if err != nil {
-		return "", nil, err
+	targetMint, ok := tb.symm.MaybeMintFromSym(instruction.TargetSymbol)
+	if !ok {
+		candidate, ok := tb.symm.UnresolvedCandidate()
+		if ok {
+			return "", nil, &MissingSymbolMappingError{Symbol: instruction.TargetSymbol, Mint: candidate}
+		}
+		return "", nil, fmt.Errorf("we don't have a way to map your target token, the pool's token pair is unmapped: %s", instruction.TargetSymbol)
 	}
-	instruction.TargetSymbol = tb.symbolForMint(targetMint)
 
 	// TODO(@hadydotai):BUG: This is a problem, poolBalances always creates slices of an exact size, so len(balances) will
 	// actually never be zero, it's not a signal for errors. In fact, neither are, balances and errs have a length.
@@ -106,7 +77,7 @@ func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, er
 	t.SetCaption("CPMM/CP-Swap Raydium Pool")
 	t.Style().Size.WidthMax = 120
 	t.AppendHeader(table.Row{"", "Token 0", "Token 1"})
-	t.AppendRow(table.Row{"Symbol", tb.symbolForMint(tb.pool.Token0Mint), tb.symbolForMint(tb.pool.Token1Mint)})
+	t.AppendRow(table.Row{"Symbol", tb.symm.SymFrom(tb.pool.Token0Mint), tb.symm.SymFrom(tb.pool.Token1Mint)})
 
 	balancesDisplay := make([]any, len(balances)+1)
 	balancesDisplay[0] = "Balances"
@@ -119,7 +90,7 @@ func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, er
 			balancesDisplay[i+1] = "n/a"
 			continue
 		}
-		balancesDisplay[i+1] = humanAmount(balances[i].Balance, balances[i].Decimals, int(balances[i].Decimals))
+		balancesDisplay[i+1] = fmtForDisplay(balances[i].Balance, balances[i].Decimals, int(balances[i].Decimals))
 	}
 	t.AppendRow(balancesDisplay)
 
@@ -141,22 +112,17 @@ func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, er
 
 	t.AppendSeparator()
 	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate, SlippageRatio: slippageRat, SlippagePct: slippagePct}
-	intentMeta, intentErr := cp.DoIntent(instruction, tb.pool, targetMint, balances...)
+	intentMeta, intentErr := NewCPIntent(cp, tb.pool, tb.poolPubKey, instruction, targetMint, balances...)
 	intentRow := table.Row{"Intent", "", ""}
 	targetTokenCell := 0
 	if targetMint.Equals(tb.pool.Token1Mint) {
 		targetTokenCell = 1
 	}
 	counterTokenCell := 1 - targetTokenCell
-	counterMint := tb.pool.Token1Mint
-	if targetTokenCell == 1 {
-		counterMint = tb.pool.Token0Mint
-	}
-
 	if intentErr != nil {
 		errMsg := fmt.Sprintf("intent failed: %s", intentErr)
-		if intentMeta != nil {
-			errMsg = fmt.Sprintf("%s %s %s failed: %s", intentMeta.Verb, intentMeta.AmountStr, instruction.TargetSymbol, intentErr)
+		if instruction != nil {
+			errMsg = fmt.Sprintf("%s %s %s failed: %s", instruction.Verb, instruction.AmountStr, instruction.TargetSymbol, intentErr)
 		}
 		intentRow[targetTokenCell+1] = errMsg
 		intentRow[counterTokenCell+1] = errMsg
@@ -169,9 +135,9 @@ func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, er
 	if counterTokenCell < len(balances) && balances[counterTokenCell] != nil {
 		counterTokenDecimals = balances[counterTokenCell].Decimals
 	}
-	counterTokenAmount := humanAmount(intentMeta.Amount, counterTokenDecimals, int(counterTokenDecimals))
-	intentText := fmt.Sprintf("%s %s %s", intentMeta.Verb, intentMeta.AmountStr, instruction.TargetSymbol)
-	counterSymbol := tb.symbolForMint(counterMint)
+	counterTokenAmount := fmtForDisplay(intentMeta.QuoteAmount, counterTokenDecimals, int(counterTokenDecimals))
+	intentText := fmt.Sprintf("%s %s %s", intentMeta.Instruction.Verb, intentMeta.Instruction.AmountStr, instruction.TargetSymbol)
+	counterSymbol := tb.symm.SymFrom(intentMeta.CounterMint)
 
 	switch intentMeta.Dir {
 	case SwapDirSell:
@@ -186,4 +152,82 @@ func (tb *TableBuilder) Build(intentLine string) (string, *IntentInstruction, er
 	t.AppendRow(intentRow)
 	t.Render()
 	return builder.String(), intentMeta, nil
+}
+
+// poolBalances will fetch balances from all vaults concurrently or in parallel depending on how you configure Go exec env,
+// it's also cpu cache friendly. We don't side step the cache line, each Go routine owns and mutates its own data, no
+// shared data contention resulting in cache evictions
+//
+// Returns two equal length slices (equals len(vaults)), balances and errors, so they can be indexed over in tandem.
+func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.PublicKey) ([]*PoolBalance, []error) {
+	results := make([]*PoolBalance, len(vaults))
+	errs := make([]error, len(vaults))
+	wg := sync.WaitGroup{}
+	for i := range vaults {
+		i, vault := i, &vaults[i] // NOTE(@hadydotai): order matters here, https://go.dev/ref/spec#For_clause
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.GetTokenAccountBalance(ctx, *vault, rpc.CommitmentFinalized)
+			if err != nil {
+				errs[i] = fmt.Errorf("rpc call getTokenAccountBalance failed: %w", err)
+				return
+			}
+			if resp == nil {
+				errs[i] = errors.New("rpc call getTokenAccountBalance failed, returning empty response")
+				return
+			}
+
+			if resp.Value == nil {
+				// NOTE(@hadydotai): Really unsure about this, need to find some failure cases. Is it even possible
+				// for a pool to drain completely on Raydium, if so what would that look like at this point here.
+				// If not, what could land me here then, parsing error? error on the wire? I don't know. Maybe it's okay
+				// to have no value and report a 0 balance. For now we'll error and gracefully show it to the user.
+				errs[i] = errors.New("rpc call getTokenAccountBalance failed, returned no balance")
+				return
+			}
+			amount, ok := new(big.Int).SetString(resp.Value.Amount, 10)
+			if !ok {
+				errs[i] = fmt.Errorf("balance is an invalid amount %q", resp.Value.Amount)
+				return
+			}
+			results[i] = &PoolBalance{
+				Balance:  amount,
+				Decimals: resp.Value.Decimals,
+			}
+		}()
+	}
+	wg.Wait()
+	return results, errs
+}
+
+func parseIntent(intentLine string) (*IntentInstruction, error) {
+	intentParts := strings.Fields(intentLine)
+	if len(intentParts) != 3 {
+		return nil, errors.New("intent instructions must be <verb> <amount> <token-symbol>")
+	}
+	verb := intentParts[0]
+	knownAmountStr := intentParts[1]
+	tokenSymbol := intentParts[2]
+	dir, err := verbToSwapDir(verb)
+	if err != nil {
+		return nil, err
+	}
+	return &IntentInstruction{
+		Verb:         verb,
+		AmountStr:    knownAmountStr,
+		Dir:          dir,
+		TargetSymbol: strings.ToUpper(tokenSymbol),
+	}, nil
+}
+
+func verbToSwapDir(verb string) (SwapDir, error) {
+	switch verb {
+	case "pay", "sell", "swap":
+		return SwapDirSell, nil
+	case "buy", "get":
+		return SwapDirBuy, nil
+	default:
+		return SwapDirUnknown, fmt.Errorf("verb(%s) has no clear swap direction", verb)
+	}
 }

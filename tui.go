@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -37,9 +38,14 @@ const (
 var spinnerFrames = []rune{'|', '/', '-', '\\'}
 
 type renderResult struct {
-	intentMeta *IntentInstruction
+	intentMeta *CPIntent
 	table      string
 	err        error
+}
+
+type symbolMappingRequest struct {
+	symbol string
+	mint   string
 }
 
 type termUI struct {
@@ -56,10 +62,11 @@ type termUI struct {
 	intentInput     string
 	spinnerFrame    int
 	statusMessage   string
-	intentMeta      *IntentInstruction
+	intentMeta      *CPIntent
 	cursorVisible   bool
 	tableFlashUntil time.Time
 	lastTable       string
+	pendingMapping  *symbolMappingRequest
 }
 
 func newTermUI(builder *TableBuilder) *termUI {
@@ -71,7 +78,7 @@ func newTermUI(builder *TableBuilder) *termUI {
 	}
 }
 
-func (ui *termUI) Run(initialIntent string) (*IntentInstruction, string, error) {
+func (ui *termUI) Run(initialIntent string) (*CPIntent, string, error) {
 	if err := termbox.Init(); err != nil {
 		return nil, "", err
 	}
@@ -123,8 +130,16 @@ func (ui *termUI) Run(initialIntent string) (*IntentInstruction, string, error) 
 				ui.currentIntent = res.intentMeta.String()
 			}
 			if res.err != nil {
-				ui.statusMessage = fmt.Sprintf("failed to compute intent: %v", res.err)
-				ui.mode = modeAwaitDecision
+				var mapErr *MissingSymbolMappingError
+				if errors.As(res.err, &mapErr) {
+					ui.pendingMapping = &symbolMappingRequest{symbol: mapErr.Symbol, mint: mapErr.Mint}
+					ui.tableLines = nil
+					ui.statusMessage = fmt.Sprintf("Symbol %s is unknown. Map it to %s? (y=yes, n=no)", mapErr.Symbol, mapErr.MintDisplay())
+					ui.mode = modeAwaitDecision
+				} else {
+					ui.statusMessage = fmt.Sprintf("failed to compute intent: %v", res.err)
+					ui.mode = modeAwaitDecision
+				}
 			} else {
 				ui.tableLines = splitLines(res.table)
 				ui.statusMessage = "Press y=yes, n=no, c=change intent, s=slippage."
@@ -160,6 +175,18 @@ func (ui *termUI) startCompute(intent string) {
 	}(intent)
 }
 
+func (ui *termUI) rerunLastIntent() {
+	intent := ui.intentInput
+	if strings.TrimSpace(intent) == "" {
+		intent = ui.busyIntent
+	}
+	if strings.TrimSpace(intent) == "" {
+		ui.statusMessage = "No previous intent to recompute. Press c to enter a new intent."
+		return
+	}
+	ui.startCompute(intent)
+}
+
 func (ui *termUI) handleKey(ev termbox.Event) (userDecision, bool) {
 	if ev.Key == termbox.KeyCtrlC {
 		return userDecisionBailout, true
@@ -170,18 +197,36 @@ func (ui *termUI) handleKey(ev termbox.Event) (userDecision, bool) {
 			return userDecisionBailout, true
 		}
 	case modeAwaitDecision:
+		if ui.pendingMapping != nil {
+			switch ev.Ch {
+			case 'y', 'Y':
+				symbol := ui.pendingMapping.symbol
+				mint := ui.pendingMapping.mint
+				ui.builder.symm.MapSymToMint(symbol, mint)
+				ui.pendingMapping = nil
+				ui.statusMessage = fmt.Sprintf("Mapped %s to %s. Recomputing...", symbol, Addr(mint))
+				ui.rerunLastIntent()
+				return userDecisionNOOP, false
+			case 'n', 'N':
+				ui.statusMessage = fmt.Sprintf("Symbol %s remains unmapped. Press c to change intent.", ui.pendingMapping.symbol)
+				ui.pendingMapping = nil
+				return userDecisionNOOP, false
+			}
+		}
 		switch ev.Ch {
 		case 'y', 'Y':
 			return userDecisionProceed, true
 		case 'n', 'N':
 			return userDecisionReject, true
 		case 'c', 'C':
+			ui.pendingMapping = nil
 			ui.mode = modePrompt
 			ui.promptBuffer = ui.promptBuffer[:0]
 			ui.statusMessage = "Enter a new intent (<verb> <amount> <token-symbol>) and press Enter."
 			ui.cursorVisible = true
 			ui.promptKind = promptKindIntent
 		case 's', 'S':
+			ui.pendingMapping = nil
 			ui.mode = modePrompt
 			ui.promptBuffer = ui.promptBuffer[:0]
 			ui.statusMessage = "Enter slippage percent (e.g. 0.5) and press Enter."
