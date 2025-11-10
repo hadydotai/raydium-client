@@ -170,7 +170,7 @@ So, let's do it.
 - [ ] Let's add some tests, I've done enough exploration, this thing is rolling.
 - [ ] Pull in all the CP-Swap pools for a pair and filter through that instead
       of providing the pool address directly.
-- [ ] I'd like to deal with tickers instead of addresses, there doesn't seem to
+- [x] I'd like to deal with tickers instead of addresses, there doesn't seem to
       be a clear easy way to do so, but some references to metaplex here and
       there, after some digging, I landed on
       [a series of issues relevant to metadata](https://github.com/gagliardetto/solana-go/issues?q=is%3Aissue%20token%20metadata).
