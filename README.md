@@ -1,5 +1,7 @@
 # Raydium Client
 
+<script src="https://asciinema.org/a/754990.js" id="asciicast-754990" async="true"></script>
+
 Raydium client is a small CLI application to interact with Raydium, specifically
 around swapping between tokens using Raydium's CPMM/CP-Swap pools.
 
@@ -34,17 +36,8 @@ Here's a non-exhaustive list of limitations that are currently in the code.
 5. You'll need to give it a pool address, it'll complain if you give it a
    non-CPMM pool, so the responsibility falls on you to source the pool you want
    to trade from.
-6. We lazily resolve token symbols when we load the pool information, hence why
-   I decided to go down that road. Initially I was asking for a token address,
-   then realized pre-caching all token metadata at least for all CPMM pools is a
-   tall order (not so much as complex as it is just outside the scope of this
-   project and shouldn't really be part of it anyway), if we had a pre-cache
-   then it would have been wonderful to ask you to supply a ticker symbol or a
-   pair and then we filter the pools to get those. Since we don't have that, I
-   decided to ask for a pool address and resolve backwards from there,
-   identifying the pair symbols.
-7. There's fancy tables, fancy interactive loop, no fancy terminal progress bars
-   :) Sorry, time is a factor here, but I'll get to it soon enough.
+6. There's fancy tables, fancy interactive loop, no fancy terminal progress
+   bars, yet.
 
 ## Prose & Contributions
 
