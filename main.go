@@ -644,6 +644,23 @@ func main() {
 	)
 	flag.Parse()
 
+	client := rpc.New(*rpcEP)
+
+	// NOTE(@hadydotai): A latest blockhash transaction will likely invalidate in anycase after about a minute,
+	// so this leaves us with about 2 minutes of working time, if our RPC node is that slow, then we've got a problem.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// tokenAddrPubK, err := solana.PublicKeyFromBase58(*tokenAddr)
+	// if err != nil {
+	// 	log.Fatalf("deriving public key from given token address (base58) failed, make sure it's base58 encoded: %s\n", err)
+	// }
+
+	// tokenMeta, err := tokenMetadata(ctx, client, tokenAddrPubK)
+	// if err != nil {
+	// 	log.Fatalln(err)
+	// }
+
 	payer, err := solana.PrivateKeyFromSolanaKeygenFile(*hotwalletPath)
 	if err != nil {
 		log.Fatalf("failed to load private key from hot wallet: %s\n", err)
@@ -653,23 +670,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("deriving public key from pool address (base58) failed, make sure it's base58 encoded: %s\n", err)
 	}
-
-	client := rpc.New(*rpcEP)
-
-	// NOTE(@hadydotai): A latest blockhash transaction will likely invalidate in anycase after about a minute,
-	// so this leaves us with about 2 minutes of working time, if our RPC node is that slow, then we've got a problem.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	// NOTE(@hadydotai): So, here we're getting the pool that's been passed in, but we need to figure out if we dont have a pool passed in
-	// to actually get all the pools from Raydium's CPMM program. In anycase, I think what I'd like to actually be doing is
-	// fetching all the pools from CPMM program, creating a Set out of the mint addresses and then hitting metaplex token metadata
-	// program to get the symbols. Cache the symbols and the pools in a database.
-	//
-	// I suppose the next point is, when do I update. Well, I reckon without chewing on glass for too long, I'll just trigger a lazy
-	// update when the user is asking for something that I don't have, ideally this would not be the case, we'd load up the
-	// data once, websocket connect and run an indexer. I see the bridge, not crossing it right now.
-
 	accountInfo, err := client.GetAccountInfoWithOpts(ctx, poolPubK, &rpc.GetAccountInfoOpts{Encoding: solana.EncodingBase64})
 	if err != nil {
 		log.Fatalf("rpc call getAccountInfo for Pool failed, check if the RPC endpoint is valid, or if you're being limited: %s\n", err)
@@ -735,6 +735,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("attempts to get/make ATA for output token failed: %s\n", err)
 	}
+	inATACreated := len(inATAixs) > 0
 
 	auth, _, err := solana.FindProgramAddress(
 		[][]byte{[]byte("vault_and_lp_mint_auth_seed")}, // https://github.com/raydium-io/raydium-cp-swap/blob/master/programs/cp-swap/src/lib.rs#L43
@@ -793,6 +794,17 @@ func main() {
 	ixs = append(ixs, outATAixs...)
 	ixs = append(ixs, wrapIxs...)
 	ixs = append(ixs, swapIx)
+	// NOTE(@hadydotai): Was mulling over the transactions and realized I don't close the wSOL temporary ATA we create when
+	// dealing with SOL. Then a thought struck me, if we accidently close the output ATA we'll burn the money we just received.
+	// So this right here, is a very fucking critical. Any wrong state in any of these values, and we're cooking money.
+	if isNativeSOL(intentMeta.TokenInMint) && inATACreated {
+		closeIx := tokenprog.NewCloseAccountInstructionBuilder().
+			SetAccount(inATA).
+			SetDestinationAccount(payerPub).
+			SetOwnerAccount(payerPub).
+			Build()
+		ixs = append(ixs, closeIx)
+	}
 
 	recent, err := client.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
 	if err != nil {
