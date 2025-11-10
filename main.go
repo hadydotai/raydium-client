@@ -187,6 +187,39 @@ func humanToFixed(amountStr string, decimals uint8) (*big.Int, error) {
 	return new(big.Int).Set(rat.Num()), nil
 }
 
+func buildTokenSymbolMaps(ctx context.Context, client *rpc.Client, mints []solana.PublicKey) (map[string]string, map[string]solana.PublicKey) {
+	mintToSymbol := make(map[string]string, len(mints))
+	symbolToMint := make(map[string]solana.PublicKey, len(mints))
+	for _, mint := range mints {
+		symbol := fetchTokenSymbol(ctx, client, mint)
+		if len(symbol) == 0 {
+			symbol = Addr(mint.String()).String()
+		}
+		symbol = normalizeSymbol(symbol)
+		mintToSymbol[mint.String()] = symbol
+		symbolToMint[symbol] = mint
+	}
+	return mintToSymbol, symbolToMint
+}
+
+func fetchTokenSymbol(ctx context.Context, client *rpc.Client, mint solana.PublicKey) string {
+	tokenMeta, err := tokenMetadata(ctx, client, mint)
+	if err != nil {
+		log.Printf("warning: failed to fetch metadata for mint %s: %v", Addr(mint.String()), err)
+		return ""
+	}
+	return tokenMeta.Symbol
+}
+
+func normalizeSymbol(raw string) string {
+	sym := strings.TrimSpace(raw)
+	sym = strings.Trim(sym, "\x00")
+	sym = strings.ReplaceAll(sym, " ", "")
+	sym = strings.ReplaceAll(sym, "\t", "")
+	sym = strings.ToUpper(sym)
+	return sym
+}
+
 type PoolBalance struct {
 	Balance  *big.Int
 	Decimals uint8
@@ -196,6 +229,8 @@ type IntentInstruction struct {
 	Verb      string
 	AmountStr string
 	Dir       SwapDir
+	// TargetSymbol is the user-supplied ticker symbol resolved from metadata.
+	TargetSymbol string
 
 	// NOTE(@hadydotai):CLEAN: Everything we'll need for building a transaction sits here, I'd like to think of
 	// something better than this but for now, it'll do fine.
@@ -219,7 +254,10 @@ type IntentInstruction struct {
 }
 
 func (ii *IntentInstruction) String() string {
-	return fmt.Sprintf("%s %s", ii.Verb, ii.AmountStr)
+	if ii.TargetSymbol == "" {
+		return fmt.Sprintf("%s %s", ii.Verb, ii.AmountStr)
+	}
+	return fmt.Sprintf("%s %s %s", ii.Verb, ii.AmountStr, ii.TargetSymbol)
 }
 
 // poolBalances will fetch balances from all vaults concurrently or in parallel depending on how you configure Go exec env,
@@ -442,10 +480,9 @@ func (cp ConstantProduct) QuoteIn(amountOut *big.Int) (*big.Int, error) {
 	return grossAmountIn, nil
 }
 
-func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.PoolState, targetTokenAddr Addr, balances ...*PoolBalance) (*IntentInstruction, error) {
-	instruction, err := parseIntent(intentLine)
-	if err != nil {
-		return nil, err
+func (cp ConstantProduct) DoIntent(instruction *IntentInstruction, pool *raydium_cp_swap.PoolState, targetMint solana.PublicKey, balances ...*PoolBalance) (*IntentInstruction, error) {
+	if instruction == nil {
+		return nil, errors.New("intent instruction missing")
 	}
 	if len(balances) != 2 {
 		// NOTE(@hadydotai): Who's fault is this actually? Mine or the users? Possible location for a panic here as
@@ -457,15 +494,22 @@ func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.Pool
 			return instruction, fmt.Errorf("missing balance information for token index %d", i)
 		}
 	}
+	targetIsToken0 := targetMint.Equals(pool.Token0Mint)
+	targetIsToken1 := targetMint.Equals(pool.Token1Mint)
+	if !targetIsToken0 && !targetIsToken1 {
+		return instruction, fmt.Errorf("token %s not part of pool", targetMint.String())
+	}
+
 	var (
 		knownAmount *big.Int
 		quote       *big.Int
+		err         error
 	)
 
 	// and now for the tricky bit https://youtu.be/lKXe3HUG2l4?si=Tb6V5Pe0k9nKzcBh&t=628
 	switch instruction.Dir {
 	case SwapDirBuy:
-		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
+		if targetIsToken0 {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[0].Decimals)
 			if err != nil {
 				return instruction, err
@@ -489,7 +533,7 @@ func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.Pool
 			return instruction, err
 		}
 	case SwapDirSell:
-		if targetTokenAddr == Addr(pool.Token0Mint.String()) {
+		if targetIsToken0 {
 			knownAmount, err = humanToFixed(instruction.AmountStr, balances[0].Decimals)
 			if err != nil {
 				return instruction, err
@@ -541,19 +585,21 @@ func (cp ConstantProduct) DoIntent(intentLine string, pool *raydium_cp_swap.Pool
 
 func parseIntent(intentLine string) (*IntentInstruction, error) {
 	intentParts := strings.Fields(intentLine)
-	if len(intentParts) != 2 {
-		return nil, errors.New("intent instructions must be a <verb> <amount>, and one pair per line")
+	if len(intentParts) != 3 {
+		return nil, errors.New("intent instructions must be <verb> <amount> <token-symbol>")
 	}
 	verb := intentParts[0]
 	knownAmountStr := intentParts[1]
+	tokenSymbol := intentParts[2]
 	dir, err := verbToSwapDir(verb)
 	if err != nil {
 		return nil, err
 	}
 	return &IntentInstruction{
-		Verb:      verb,
-		AmountStr: knownAmountStr,
-		Dir:       dir,
+		Verb:         verb,
+		AmountStr:    knownAmountStr,
+		Dir:          dir,
+		TargetSymbol: strings.ToUpper(tokenSymbol),
 	}, nil
 }
 
@@ -637,8 +683,7 @@ func main() {
 		hotwalletPath  = flag.String("hotwallet", "", "Path to the hotwallet to use for signing transactions")
 		rpcEP          = flag.String("rpc", rpc.DevNet_RPC, "RPC to connect to")
 		poolAddr       = flag.String("pool", ourCorePoolAddr.String(), "Pool to interact with")
-		intentLine     = flag.String("intent", "pay 100", "Intent and direction of the trade")
-		tokenAddr      = flag.String("token", wSOLMintAddr.String(), "Token address to trade")
+		intentLine     = flag.String("intent", "", "Intent (<verb> <amount> <token-symbol>), e.g. \"pay 1 SOL\"")
 		slippagePct    = flag.Float64("slippage", 0.5, "Slippage tolerance percentage (e.g. 0.5 for 0.5%)")
 		nonInteractive = flag.Bool("non-interactive", false, "Don't enter interactive mode (TUI), execute immediately")
 	)
@@ -650,16 +695,6 @@ func main() {
 	// so this leaves us with about 2 minutes of working time, if our RPC node is that slow, then we've got a problem.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-
-	// tokenAddrPubK, err := solana.PublicKeyFromBase58(*tokenAddr)
-	// if err != nil {
-	// 	log.Fatalf("deriving public key from given token address (base58) failed, make sure it's base58 encoded: %s\n", err)
-	// }
-
-	// tokenMeta, err := tokenMetadata(ctx, client, tokenAddrPubK)
-	// if err != nil {
-	// 	log.Fatalln(err)
-	// }
 
 	payer, err := solana.PrivateKeyFromSolanaKeygenFile(*hotwalletPath)
 	if err != nil {
@@ -693,14 +728,26 @@ func main() {
 		log.Fatalf("parsing pool's AmmConfig failed: %s\n", err)
 	}
 
-	targetAddr := Addr(*tokenAddr)
+	tokenMints := []solana.PublicKey{pool.Token0Mint, pool.Token1Mint}
+	mintToSymbol, symbolToMint := buildTokenSymbolMaps(ctx, client, tokenMints)
+	defaultSymbol := mintToSymbol[pool.Token0Mint.String()]
+	if defaultSymbol == "" {
+		defaultSymbol = Addr(pool.Token0Mint.String()).String()
+	}
+	initialIntent := strings.TrimSpace(*intentLine)
+	if initialIntent == "" {
+		initialIntent = fmt.Sprintf("pay 1 %s", defaultSymbol)
+	}
+
 	builder := &TableBuilder{
 		ctx:           ctx,
 		client:        client,
 		pool:          pool,
 		poolAmmConfig: poolAmmConfig,
-		targetAddr:    targetAddr,
 		poolAddress:   *poolAddr,
+		tokenOrder:    tokenMints,
+		mintToSymbol:  mintToSymbol,
+		symbolToMint:  symbolToMint,
 	}
 	if err := builder.SetSlippagePct(*slippagePct); err != nil {
 		log.Fatalf("invalid slippage: %s\n", err)
@@ -709,14 +756,14 @@ func main() {
 	var intentMeta *IntentInstruction
 	if *nonInteractive {
 		var report string
-		report, intentMeta, err = builder.Build(*intentLine)
+		report, intentMeta, err = builder.Build(initialIntent)
 		if err != nil {
 			log.Fatalf("building intent report failed: %s\n", err)
 		}
 		_, _ = fmt.Fprintf(os.Stdout, "%s", report)
 	} else {
 		ui := newTermUI(builder)
-		intentMeta, err = ui.Run(*intentLine)
+		intentMeta, err = ui.Run(initialIntent)
 		if err != nil {
 			log.Fatalf("interactive UI failed: %s\n", err)
 		}

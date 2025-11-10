@@ -176,7 +176,7 @@ func (ui *termUI) handleKey(ev termbox.Event) (userDecision, bool) {
 		case 'c', 'C':
 			ui.mode = modePrompt
 			ui.promptBuffer = ui.promptBuffer[:0]
-			ui.statusMessage = "Enter a new intent and press Enter."
+			ui.statusMessage = "Enter a new intent (<verb> <amount> <token-symbol>) and press Enter."
 			ui.cursorVisible = true
 			ui.promptKind = promptKindIntent
 		case 's', 'S':
