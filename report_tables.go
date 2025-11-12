@@ -187,6 +187,11 @@ func poolBalances(ctx context.Context, client *rpc.Client, vaults []solana.Publi
 	wg := sync.WaitGroup{}
 	for i := range vaults {
 		i, vault := i, &vaults[i] // NOTE(@hadydotai): order matters here, https://go.dev/ref/spec#For_clause
+
+		// TODO(@hadydotai):CLEANUP: Remove me when I upgrade my dev env
+		// NOTE(@hadydotai): Alternatively if I was running go1.25.0 I can use
+		// https://pkg.go.dev/sync#WaitGroup.Go alas, I'm not. Development is currently happening on
+		// go1.24.3 as indicated in go.mod
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
