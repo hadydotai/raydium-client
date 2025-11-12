@@ -19,7 +19,6 @@ type ConstantProduct struct {
 	TokenOutReserve *PoolBalance
 	TradeFeeRate    uint64
 	SlippageRatio   *big.Rat
-	SlippagePct     float64
 }
 
 func (cp ConstantProduct) tradeFeeNumerator() (int64, error) {

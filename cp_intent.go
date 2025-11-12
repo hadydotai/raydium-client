@@ -41,7 +41,6 @@ func (ii *IntentInstruction) String() string {
 // CPIntent captures the resolved swap details derived from the pool + user intent.
 type CPIntent struct {
 	Instruction   *IntentInstruction
-	TargetMint    solana.PublicKey
 	CounterMint   solana.PublicKey
 	Dir           SwapDir
 	SwapKind      SwapKind
@@ -174,7 +173,6 @@ func NewCPIntent(cp ConstantProduct, pool *raydium_cp_swap.PoolState, poolAddres
 
 	intent := &CPIntent{
 		Instruction:   instruction,
-		TargetMint:    targetMint,
 		Dir:           instruction.Dir,
 		SwapKind:      SwapKindUnknown,
 		SlippagePct:   cp.SlippagePct,
