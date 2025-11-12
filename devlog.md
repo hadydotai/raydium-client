@@ -167,7 +167,7 @@ So, let's do it.
       quoting both directions anyway, also my intent modeling handles both
       directions, a little iffy around `QuoteIn`'s fee handling, I have to test
       this more.
-- [ ] Let's add some tests, I've done enough exploration, this thing is rolling.
+- [x] Let's add ~~some~~ tests for every critical path in the code
 - [ ] Pull in all the CP-Swap pools for a pair and filter through that instead
       of providing the pool address directly.
 - [x] I'd like to deal with tickers instead of addresses, there doesn't seem to
