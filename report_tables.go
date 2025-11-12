@@ -107,8 +107,8 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 	tradeFeeRow := formatFeeRate(tb.poolAmmConfig.TradeFeeRate)
 	t.AppendRow(table.Row{"Trade fee", tradeFeeRow, tradeFeeRow})
 	slippagePct, slippageRat := tb.slippage()
-	slippageRow := formatPercent(slippagePct)
-	t.AppendRow(table.Row{"Slippage", slippageRow, slippageRow}, table.RowConfig{AutoMerge: true, AutoMergeAlign: text.AlignLeft})
+	slippageDisplay := formatPercent(slippagePct)
+	t.AppendRow(table.Row{"Slippage", slippageDisplay, slippageDisplay}, table.RowConfig{AutoMerge: true, AutoMergeAlign: text.AlignLeft})
 
 	t.AppendSeparator()
 	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate, SlippageRatio: slippageRat}
@@ -131,10 +131,14 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 		return builder.String(), intentMeta, nil
 	}
 
-	counterDecimals := intentMeta.CounterLeg().Decimals
+	counterLeg := intentMeta.CounterLeg()
+	if counterLeg == nil {
+		return "", nil, errors.New("intent has no counter leg")
+	}
+	counterDecimals := counterLeg.Decimals
 	counterTokenAmount := fmtForDisplay(cloneInt(intentMeta.Amounts.QuoteAmount), counterDecimals, int(counterDecimals))
 	intentText := intentMeta.String()
-	counterSymbol := tb.symm.SymFrom(intentMeta.CounterLeg().Mint)
+	counterSymbol := tb.symm.SymFrom(counterLeg.Mint)
 
 	switch intentMeta.SwapKind {
 	case SwapKindBaseInput:
@@ -147,6 +151,27 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 		panic("shouldn't be here, did we miss an early return checking for verbToSwapDir error value?")
 	}
 	t.AppendRow(intentRow)
+
+	quoteRow := table.Row{"Quote (no slippage)", "", ""}
+	slippageRow := table.Row{"Slippage guard", "", ""}
+	switch intentMeta.SwapKind {
+	case SwapKindBaseInput:
+		outputDecimals := intentMeta.TokenOut.Decimals
+		outputSymbol := tb.symm.SymFrom(intentMeta.TokenOut.Mint)
+		estimate := fmtForDisplay(intentMeta.Amounts.QuoteAmount, outputDecimals, int(outputDecimals))
+		minOut := fmtForDisplay(intentMeta.Amounts.MinAmountOut, outputDecimals, int(outputDecimals))
+		quoteRow[counterTokenCell+1] = fmt.Sprintf("est. receive %s %s", estimate, outputSymbol)
+		slippageRow[counterTokenCell+1] = fmt.Sprintf("min receive %s %s", minOut, outputSymbol)
+	case SwapKindBaseOutput:
+		inputDecimals := intentMeta.TokenIn.Decimals
+		inputSymbol := tb.symm.SymFrom(intentMeta.TokenIn.Mint)
+		estimate := fmtForDisplay(intentMeta.Amounts.QuoteAmount, inputDecimals, int(inputDecimals))
+		maxIn := fmtForDisplay(intentMeta.Amounts.MaxAmountIn, inputDecimals, int(inputDecimals))
+		quoteRow[counterTokenCell+1] = fmt.Sprintf("est. pay %s %s", estimate, inputSymbol)
+		slippageRow[counterTokenCell+1] = fmt.Sprintf("max pay %s %s", maxIn, inputSymbol)
+	}
+	t.AppendRow(quoteRow)
+	t.AppendRow(slippageRow)
 	t.Render()
 	return builder.String(), intentMeta, nil
 }
