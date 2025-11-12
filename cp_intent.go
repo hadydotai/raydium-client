@@ -24,6 +24,29 @@ type PoolBalance struct {
 	Decimals uint8
 }
 
+// SwapLeg captures one side of the swap (input or output).
+type SwapLeg struct {
+	Mint     solana.PublicKey
+	Vault    solana.PublicKey
+	Program  solana.PublicKey
+	Decimals uint8
+}
+
+// SwapAmounts centralizes the various numeric values produced while resolving an intent.
+type SwapAmounts struct {
+	KnownAmount  *big.Int // amount supplied by the user (in token they referenced)
+	QuoteAmount  *big.Int // counter amount computed by the curve prior to slippage adjustments
+	MinAmountOut *big.Int
+	MaxAmountIn  *big.Int
+}
+
+// PoolAccounts references the on-chain accounts that tie this intent to a specific Raydium pool.
+type PoolAccounts struct {
+	Address     solana.PublicKey
+	AmmConfig   solana.PublicKey
+	Observation solana.PublicKey
+}
+
 type IntentInstruction struct {
 	Verb         string
 	AmountStr    string
@@ -40,30 +63,12 @@ func (ii *IntentInstruction) String() string {
 
 // CPIntent captures the resolved swap details derived from the pool + user intent.
 type CPIntent struct {
-	Instruction   *IntentInstruction
-	CounterMint   solana.PublicKey
-	Dir           SwapDir
-	SwapKind      SwapKind
-	SlippagePct   float64
-	SlippageRatio *big.Rat
-
-	KnownAmount  *big.Int // amount supplied by the user (in token they referenced)
-	QuoteAmount  *big.Int // counter amount computed by the curve prior to slippage adjustments
-	MinAmountOut *big.Int
-	MaxAmountIn  *big.Int
-
-	TokenInMint      solana.PublicKey
-	TokenOutMint     solana.PublicKey
-	TokenInVault     solana.PublicKey
-	TokenOutVault    solana.PublicKey
-	TokenInProgram   solana.PublicKey
-	TokenOutProgram  solana.PublicKey
-	TokenInDecimals  uint8
-	TokenOutDecimals uint8
-
-	PoolAddress solana.PublicKey
-	AmmConfig   solana.PublicKey
-	Observation solana.PublicKey
+	Instruction *IntentInstruction
+	SwapKind    SwapKind
+	Amounts     SwapAmounts
+	TokenIn     SwapLeg
+	TokenOut    SwapLeg
+	Pool        PoolAccounts
 }
 
 // String renders the original intent instruction for UI purposes.
@@ -81,9 +86,24 @@ func (ci *CPIntent) RequiredInputAmount() *big.Int {
 	}
 	switch ci.SwapKind {
 	case SwapKindBaseInput:
-		return cloneInt(ci.KnownAmount)
+		return cloneInt(ci.Amounts.KnownAmount)
 	case SwapKindBaseOutput:
-		return cloneInt(ci.MaxAmountIn)
+		return cloneInt(ci.Amounts.MaxAmountIn)
+	default:
+		return nil
+	}
+}
+
+// CounterLeg returns the swap leg that represents the counter token relative to the user's instruction.
+func (ci *CPIntent) CounterLeg() *SwapLeg {
+	if ci == nil {
+		return nil
+	}
+	switch ci.SwapKind {
+	case SwapKindBaseInput:
+		return &ci.TokenOut
+	case SwapKindBaseOutput:
+		return &ci.TokenIn
 	default:
 		return nil
 	}
@@ -96,52 +116,52 @@ func (ci *CPIntent) BuildSwapInstruction(payer solana.PublicKey, authority solan
 	}
 	switch ci.SwapKind {
 	case SwapKindBaseInput:
-		if ci.KnownAmount == nil || ci.MinAmountOut == nil {
+		if ci.Amounts.KnownAmount == nil || ci.Amounts.MinAmountOut == nil {
 			return nil, errors.New("swap input intent missing amounts")
 		}
-		if !ci.KnownAmount.IsUint64() || !ci.MinAmountOut.IsUint64() {
+		if !ci.Amounts.KnownAmount.IsUint64() || !ci.Amounts.MinAmountOut.IsUint64() {
 			return nil, errors.New("amounts exceed uint64 range required by the program")
 		}
 		return raydium_cp_swap.NewSwapBaseInputInstruction(
-			ci.KnownAmount.Uint64(),
-			ci.MinAmountOut.Uint64(),
+			ci.Amounts.KnownAmount.Uint64(),
+			ci.Amounts.MinAmountOut.Uint64(),
 			payer,
 			authority,
-			ci.AmmConfig,
-			ci.PoolAddress,
+			ci.Pool.AmmConfig,
+			ci.Pool.Address,
 			inputATA,
 			outputATA,
-			ci.TokenInVault,
-			ci.TokenOutVault,
-			ci.TokenInProgram,
-			ci.TokenOutProgram,
-			ci.TokenInMint,
-			ci.TokenOutMint,
-			ci.Observation,
+			ci.TokenIn.Vault,
+			ci.TokenOut.Vault,
+			ci.TokenIn.Program,
+			ci.TokenOut.Program,
+			ci.TokenIn.Mint,
+			ci.TokenOut.Mint,
+			ci.Pool.Observation,
 		)
 	case SwapKindBaseOutput:
-		if ci.MaxAmountIn == nil || ci.KnownAmount == nil {
+		if ci.Amounts.MaxAmountIn == nil || ci.Amounts.KnownAmount == nil {
 			return nil, errors.New("swap output intent missing amounts")
 		}
-		if !ci.MaxAmountIn.IsUint64() || !ci.KnownAmount.IsUint64() {
+		if !ci.Amounts.MaxAmountIn.IsUint64() || !ci.Amounts.KnownAmount.IsUint64() {
 			return nil, errors.New("amounts exceed uint64 range required by the program")
 		}
 		return raydium_cp_swap.NewSwapBaseOutputInstruction(
-			ci.MaxAmountIn.Uint64(),
-			ci.KnownAmount.Uint64(),
+			ci.Amounts.MaxAmountIn.Uint64(),
+			ci.Amounts.KnownAmount.Uint64(),
 			payer,
 			authority,
-			ci.AmmConfig,
-			ci.PoolAddress,
+			ci.Pool.AmmConfig,
+			ci.Pool.Address,
 			inputATA,
 			outputATA,
-			ci.TokenInVault,
-			ci.TokenOutVault,
-			ci.TokenInProgram,
-			ci.TokenOutProgram,
-			ci.TokenInMint,
-			ci.TokenOutMint,
-			ci.Observation,
+			ci.TokenIn.Vault,
+			ci.TokenOut.Vault,
+			ci.TokenIn.Program,
+			ci.TokenOut.Program,
+			ci.TokenIn.Mint,
+			ci.TokenOut.Mint,
+			ci.Pool.Observation,
 		)
 	default:
 		return nil, errors.New("unsupported swap kind")
@@ -150,15 +170,6 @@ func (ci *CPIntent) BuildSwapInstruction(payer solana.PublicKey, authority solan
 
 // NewCPIntent derives a CPIntent by combining pool data, balances, and the user instruction.
 func NewCPIntent(cp ConstantProduct, pool *raydium_cp_swap.PoolState, poolAddress solana.PublicKey, instruction *IntentInstruction, targetMint solana.PublicKey, balances ...*PoolBalance) (*CPIntent, error) {
-	if instruction == nil {
-		return nil, errors.New("intent instruction missing")
-	}
-	if pool == nil {
-		return nil, errors.New("pool state missing")
-	}
-	if len(balances) != 2 {
-		return nil, fmt.Errorf("intents are handled per pool which is a pair of tokens, expected 2 balances, got %d", len(balances))
-	}
 	for i, bal := range balances {
 		if bal == nil || bal.Balance == nil {
 			return nil, fmt.Errorf("missing balance information for token index %d", i)
@@ -166,20 +177,19 @@ func NewCPIntent(cp ConstantProduct, pool *raydium_cp_swap.PoolState, poolAddres
 	}
 
 	targetIsToken0 := targetMint.Equals(pool.Token0Mint)
-	targetIsToken1 := targetMint.Equals(pool.Token1Mint)
-	if !targetIsToken0 && !targetIsToken1 {
-		return nil, fmt.Errorf("token %s not part of pool", targetMint.String())
+
+	makeLeg := func(mint, vault, program solana.PublicKey, decimals uint8) SwapLeg {
+		return SwapLeg{Mint: mint, Vault: vault, Program: program, Decimals: decimals}
 	}
 
 	intent := &CPIntent{
-		Instruction:   instruction,
-		Dir:           instruction.Dir,
-		SwapKind:      SwapKindUnknown,
-		SlippagePct:   cp.SlippagePct,
-		PoolAddress:   poolAddress,
-		AmmConfig:     pool.AmmConfig,
-		Observation:   pool.ObservationKey,
-		SlippageRatio: cloneRat(cp.SlippageRatio),
+		Instruction: instruction,
+		SwapKind:    SwapKindUnknown,
+		Pool: PoolAccounts{
+			Address:     poolAddress,
+			AmmConfig:   pool.AmmConfig,
+			Observation: pool.ObservationKey,
+		},
 	}
 
 	var (
@@ -197,30 +207,26 @@ func NewCPIntent(cp ConstantProduct, pool *raydium_cp_swap.PoolState, poolAddres
 				return nil, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
-			intent.TokenInMint, intent.TokenOutMint = pool.Token1Mint, pool.Token0Mint
-			intent.TokenInVault, intent.TokenOutVault = pool.Token1Vault, pool.Token0Vault
-			intent.TokenInProgram, intent.TokenOutProgram = pool.Token1Program, pool.Token0Program
-			intent.TokenInDecimals, intent.TokenOutDecimals = balances[1].Decimals, balances[0].Decimals
+			intent.TokenIn = makeLeg(pool.Token1Mint, pool.Token1Vault, pool.Token1Program, balances[1].Decimals)
+			intent.TokenOut = makeLeg(pool.Token0Mint, pool.Token0Vault, pool.Token0Program, balances[0].Decimals)
 		} else {
 			knownAmount, err = fmtForMath(instruction.AmountStr, balances[1].Decimals)
 			if err != nil {
 				return nil, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
-			intent.TokenInMint, intent.TokenOutMint = pool.Token0Mint, pool.Token1Mint
-			intent.TokenInVault, intent.TokenOutVault = pool.Token0Vault, pool.Token1Vault
-			intent.TokenInProgram, intent.TokenOutProgram = pool.Token0Program, pool.Token1Program
-			intent.TokenInDecimals, intent.TokenOutDecimals = balances[0].Decimals, balances[1].Decimals
+			intent.TokenIn = makeLeg(pool.Token0Mint, pool.Token0Vault, pool.Token0Program, balances[0].Decimals)
+			intent.TokenOut = makeLeg(pool.Token1Mint, pool.Token1Vault, pool.Token1Program, balances[1].Decimals)
 		}
 		quote, err = cp.QuoteIn(knownAmount)
 		if err != nil {
 			return nil, err
 		}
-		maxIn, err := applySlippageCeil(quote, intent.SlippageRatio)
+		maxIn, err := applySlippageCeil(quote, cp.SlippageRatio)
 		if err != nil {
 			return nil, err
 		}
-		intent.MaxAmountIn = maxIn
+		intent.Amounts.MaxAmountIn = maxIn
 	case SwapDirSell:
 		intent.SwapKind = SwapKindBaseInput
 		if targetIsToken0 {
@@ -229,43 +235,32 @@ func NewCPIntent(cp ConstantProduct, pool *raydium_cp_swap.PoolState, poolAddres
 				return nil, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[0], balances[1]
-			intent.TokenInMint, intent.TokenOutMint = pool.Token0Mint, pool.Token1Mint
-			intent.TokenInVault, intent.TokenOutVault = pool.Token0Vault, pool.Token1Vault
-			intent.TokenInProgram, intent.TokenOutProgram = pool.Token0Program, pool.Token1Program
-			intent.TokenInDecimals, intent.TokenOutDecimals = balances[0].Decimals, balances[1].Decimals
+			intent.TokenIn = makeLeg(pool.Token0Mint, pool.Token0Vault, pool.Token0Program, balances[0].Decimals)
+			intent.TokenOut = makeLeg(pool.Token1Mint, pool.Token1Vault, pool.Token1Program, balances[1].Decimals)
 		} else {
 			knownAmount, err = fmtForMath(instruction.AmountStr, balances[1].Decimals)
 			if err != nil {
 				return nil, err
 			}
 			cp.TokenInReserve, cp.TokenOutReserve = balances[1], balances[0]
-			intent.TokenInMint, intent.TokenOutMint = pool.Token1Mint, pool.Token0Mint
-			intent.TokenInVault, intent.TokenOutVault = pool.Token1Vault, pool.Token0Vault
-			intent.TokenInProgram, intent.TokenOutProgram = pool.Token1Program, pool.Token0Program
-			intent.TokenInDecimals, intent.TokenOutDecimals = balances[1].Decimals, balances[0].Decimals
+			intent.TokenIn = makeLeg(pool.Token1Mint, pool.Token1Vault, pool.Token1Program, balances[1].Decimals)
+			intent.TokenOut = makeLeg(pool.Token0Mint, pool.Token0Vault, pool.Token0Program, balances[0].Decimals)
 		}
 		quote, err = cp.QuoteOut(knownAmount)
 		if err != nil {
 			return nil, err
 		}
-		minOut, err := applySlippageFloor(quote, intent.SlippageRatio)
+		minOut, err := applySlippageFloor(quote, cp.SlippageRatio)
 		if err != nil {
 			return nil, err
 		}
-		intent.MinAmountOut = minOut
+		intent.Amounts.MinAmountOut = minOut
 	default:
 		return nil, fmt.Errorf("swap direction unknown for verb %s", instruction.Verb)
 	}
 
-	intent.KnownAmount = cloneInt(knownAmount)
-	intent.QuoteAmount = cloneInt(quote)
-
-	switch instruction.Dir {
-	case SwapDirSell:
-		intent.CounterMint = intent.TokenOutMint
-	case SwapDirBuy:
-		intent.CounterMint = intent.TokenInMint
-	}
+	intent.Amounts.KnownAmount = cloneInt(knownAmount)
+	intent.Amounts.QuoteAmount = cloneInt(quote)
 
 	return intent, nil
 }
@@ -275,11 +270,4 @@ func cloneInt(v *big.Int) *big.Int {
 		return nil
 	}
 	return new(big.Int).Set(v)
-}
-
-func cloneRat(v *big.Rat) *big.Rat {
-	if v == nil {
-		return nil
-	}
-	return new(big.Rat).Set(v)
 }

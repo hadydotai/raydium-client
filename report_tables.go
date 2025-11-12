@@ -60,7 +60,7 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 		if ok {
 			return "", nil, &MissingSymbolMappingError{Symbol: instruction.TargetSymbol, Mint: candidate}
 		}
-		return "", nil, fmt.Errorf("we don't have a way to map your target token, the pool's token pair is unmapped: %s", instruction.TargetSymbol)
+		return "", nil, fmt.Errorf("the ticker symbol you provided is either missing from our mapping or isn't part of the pool's pair: %s", instruction.TargetSymbol)
 	}
 
 	// TODO(@hadydotai):BUG: This is a problem, poolBalances always creates slices of an exact size, so len(balances) will
@@ -111,7 +111,7 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 	t.AppendRow(table.Row{"Slippage", slippageRow, slippageRow}, table.RowConfig{AutoMerge: true, AutoMergeAlign: text.AlignLeft})
 
 	t.AppendSeparator()
-	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate, SlippageRatio: slippageRat, SlippagePct: slippagePct}
+	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate, SlippageRatio: slippageRat}
 	intentMeta, intentErr := NewCPIntent(cp, tb.pool, tb.poolPubKey, instruction, targetMint, balances...)
 	intentRow := table.Row{"Intent", "", ""}
 	targetTokenCell := 0
@@ -131,19 +131,16 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 		return builder.String(), intentMeta, nil
 	}
 
-	var counterTokenDecimals uint8
-	if counterTokenCell < len(balances) && balances[counterTokenCell] != nil {
-		counterTokenDecimals = balances[counterTokenCell].Decimals
-	}
-	counterTokenAmount := fmtForDisplay(intentMeta.QuoteAmount, counterTokenDecimals, int(counterTokenDecimals))
-	intentText := fmt.Sprintf("%s %s %s", intentMeta.Instruction.Verb, intentMeta.Instruction.AmountStr, instruction.TargetSymbol)
-	counterSymbol := tb.symm.SymFrom(intentMeta.CounterMint)
+	counterDecimals := intentMeta.CounterLeg().Decimals
+	counterTokenAmount := fmtForDisplay(cloneInt(intentMeta.Amounts.QuoteAmount), counterDecimals, int(counterDecimals))
+	intentText := intentMeta.String()
+	counterSymbol := tb.symm.SymFrom(intentMeta.CounterLeg().Mint)
 
-	switch intentMeta.Dir {
-	case SwapDirSell:
+	switch intentMeta.SwapKind {
+	case SwapKindBaseInput:
 		intentRow[targetTokenCell+1] = intentText
 		intentRow[counterTokenCell+1] = fmt.Sprintf("receiving %s %s", counterTokenAmount, counterSymbol)
-	case SwapDirBuy:
+	case SwapKindBaseOutput:
 		intentRow[targetTokenCell+1] = intentText
 		intentRow[counterTokenCell+1] = fmt.Sprintf("paying %s %s", counterTokenAmount, counterSymbol)
 	default:

@@ -235,14 +235,7 @@ func formatLamports(lamports uint64) string {
 	return fmt.Sprintf("%s SOL", fmtForDisplay(val, 9, 9))
 }
 
-func chooseDecimals(primary uint8, fallback uint8) uint8 {
-	if primary != 0 {
-		return primary
-	}
-	return fallback
-}
-
-func tokenBalanceAmount(balances []rpc.TokenBalance, accountIndex int, mint solana.PublicKey) (*big.Int, uint8, bool) {
+func tokenBalanceAmount(balances []rpc.TokenBalance, accountIndex int, mint solana.PublicKey) (*big.Int, bool) {
 	for _, bal := range balances {
 		if int(bal.AccountIndex) != accountIndex {
 			continue
@@ -252,20 +245,20 @@ func tokenBalanceAmount(balances []rpc.TokenBalance, accountIndex int, mint sola
 		}
 		amount, ok := new(big.Int).SetString(bal.UiTokenAmount.Amount, 10)
 		if !ok {
-			return nil, 0, false
+			return nil, false
 		}
-		return amount, bal.UiTokenAmount.Decimals, true
+		return amount, true
 	}
-	return nil, 0, false
+	return nil, false
 }
 
-func tokenDeltaFromResult(result *rpc.GetTransactionResult, account solana.PublicKey, mint solana.PublicKey) (*big.Int, uint8, bool) {
+func tokenDeltaFromResult(result *rpc.GetTransactionResult, account solana.PublicKey, mint solana.PublicKey) (*big.Int, bool) {
 	if result == nil || result.Meta == nil || result.Transaction == nil {
-		return nil, 0, false
+		return nil, false
 	}
 	tx, err := result.Transaction.GetTransaction()
 	if err != nil || tx == nil {
-		return nil, 0, false
+		return nil, false
 	}
 	accountIndex := -1
 	for i, key := range tx.Message.AccountKeys {
@@ -275,12 +268,12 @@ func tokenDeltaFromResult(result *rpc.GetTransactionResult, account solana.Publi
 		}
 	}
 	if accountIndex == -1 {
-		return nil, 0, false
+		return nil, false
 	}
-	pre, decs, hasPre := tokenBalanceAmount(result.Meta.PreTokenBalances, accountIndex, mint)
-	post, _, hasPost := tokenBalanceAmount(result.Meta.PostTokenBalances, accountIndex, mint)
+	pre, hasPre := tokenBalanceAmount(result.Meta.PreTokenBalances, accountIndex, mint)
+	post, hasPost := tokenBalanceAmount(result.Meta.PostTokenBalances, accountIndex, mint)
 	if !hasPre && !hasPost {
-		return nil, 0, false
+		return nil, false
 	}
 	if !hasPre {
 		pre = big.NewInt(0)
@@ -289,7 +282,7 @@ func tokenDeltaFromResult(result *rpc.GetTransactionResult, account solana.Publi
 		post = big.NewInt(0)
 	}
 	delta := new(big.Int).Sub(post, pre)
-	return delta, decs, true
+	return delta, true
 }
 
 func waitForTransactionResult(ctx context.Context, client *rpc.Client, sig solana.Signature) (string, *rpc.GetTransactionResult, error) {
@@ -474,11 +467,11 @@ func main() {
 	}
 	// now we do the swap, finally.
 	payerPub := payer.PublicKey()
-	inATA, inATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenInMint)
+	inATA, inATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenIn.Mint)
 	if err != nil {
 		log.Fatalf("attempts to get/make ATA for input token failed: %s\n", err)
 	}
-	outATA, outATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenOutMint)
+	outATA, outATAixs, err := makeATAIfMissing(ctx, client, payerPub, payerPub, intentMeta.TokenOut.Mint)
 	if err != nil {
 		log.Fatalf("attempts to get/make ATA for output token failed: %s\n", err)
 	}
@@ -509,7 +502,7 @@ func main() {
 	if requiredInput == nil {
 		log.Fatalln("required input amount missing for swap")
 	}
-	wrapIxs, err := wrapNativeIfNeeded(ctx, client, payerPub, inATA, intentMeta.TokenInMint, requiredInput)
+	wrapIxs, err := wrapNativeIfNeeded(ctx, client, payerPub, inATA, intentMeta.TokenIn.Mint, requiredInput)
 	if err != nil {
 		log.Fatalf("wrapping native token failed: %s\n", err)
 	}
@@ -523,7 +516,7 @@ func main() {
 	// NOTE(@hadydotai): Was mulling over the transactions and realized I don't close the wSOL temporary ATA we create when
 	// dealing with SOL. Then a thought struck me, if we accidently close the output ATA we'll burn the money we just received.
 	// So this right here, is a very fucking critical. Any wrong state in any of these values, and we're cooking money.
-	if isNativeSOL(intentMeta.TokenInMint) && inATACreated {
+	if isNativeSOL(intentMeta.TokenIn.Mint) && inATACreated {
 		closeIx := tokenprog.NewCloseAccountInstructionBuilder().
 			SetAccount(inATA).
 			SetDestinationAccount(payerPub).
@@ -571,31 +564,28 @@ func main() {
 		feeLamports = txMeta.Fee
 	}
 	var paidDelta, receivedDelta *big.Int
-	var paidDecimals, receivedDecimals uint8
-	if delta, decs, ok := tokenDeltaFromResult(txResult, intentMeta.TokenInVault, intentMeta.TokenInMint); ok {
+	if delta, ok := tokenDeltaFromResult(txResult, intentMeta.TokenIn.Vault, intentMeta.TokenIn.Mint); ok {
 		if delta.Sign() < 0 {
 			delta.Neg(delta)
 		}
 		paidDelta = delta
-		paidDecimals = decs
 	}
-	if delta, decs, ok := tokenDeltaFromResult(txResult, intentMeta.TokenOutVault, intentMeta.TokenOutMint); ok {
+	if delta, ok := tokenDeltaFromResult(txResult, intentMeta.TokenOut.Vault, intentMeta.TokenOut.Mint); ok {
 		if delta.Sign() > 0 {
 			delta = new(big.Int).Neg(delta)
 		}
 		receivedDelta = new(big.Int).Abs(delta)
-		receivedDecimals = decs
 	}
 	summary := renderTxSummary(txSummaryData{
 		Signature:        sig,
 		Status:           status,
 		FeeLamports:      feeLamports,
 		PaidAmount:       paidDelta,
-		PaidDecimals:     chooseDecimals(paidDecimals, intentMeta.TokenInDecimals),
-		PaidSymbol:       symm.SymFrom(intentMeta.TokenInMint),
+		PaidDecimals:     intentMeta.TokenIn.Decimals,
+		PaidSymbol:       symm.SymFrom(intentMeta.TokenIn.Mint),
 		ReceivedAmount:   receivedDelta,
-		ReceivedDecimals: chooseDecimals(receivedDecimals, intentMeta.TokenOutDecimals),
-		ReceivedSymbol:   symm.SymFrom(intentMeta.TokenOutMint),
+		ReceivedDecimals: intentMeta.TokenOut.Decimals,
+		ReceivedSymbol:   symm.SymFrom(intentMeta.TokenOut.Mint),
 	})
 	fmt.Fprintln(os.Stdout, summary)
 }
