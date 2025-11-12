@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -85,11 +86,12 @@ func (ui *termUI) Run(initialIntent string) (*CPIntent, string, error) {
 	defer termbox.Close()
 	defer close(ui.done)
 	eventCh := make(chan termbox.Event)
-	go func() {
-		for {
-			eventCh <- termbox.PollEvent()
-		}
+	eventCtx, cancelEvents := context.WithCancel(context.Background())
+	defer func() {
+		cancelEvents()
+		termbox.Interrupt()
 	}()
+	go ui.pollEvents(eventCtx, eventCh)
 	ticker := time.NewTicker(120 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -98,6 +100,9 @@ func (ui *termUI) Run(initialIntent string) (*CPIntent, string, error) {
 		ui.draw()
 		select {
 		case ev := <-eventCh:
+			if ev.Type == termbox.EventInterrupt {
+				continue
+			}
 			switch ev.Type {
 			case termbox.EventError:
 				return nil, "", ev.Err
@@ -155,6 +160,17 @@ func (ui *termUI) Run(initialIntent string) (*CPIntent, string, error) {
 			} else {
 				ui.cursorVisible = true
 			}
+		}
+	}
+}
+
+func (ui *termUI) pollEvents(ctx context.Context, eventCh chan<- termbox.Event) {
+	for {
+		ev := termbox.PollEvent()
+		select {
+		case eventCh <- ev:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
