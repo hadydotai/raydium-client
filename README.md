@@ -20,9 +20,9 @@ free to open an issue and I'll see if I can get it resolved.
 For a quick run here's the latest release on linux:
 
 ```shell
-wget https://github.com/hadydotai/raydium-client/releases/download/0.0.2-alpha/raydium-client-0.0.2-alpha-linux-amd64.tar.gz
-tar xvf raydium-client-0.0.2-alpha-linux-amd64.tar.gz
-./raydium-client-0.0.2-alpha --help
+wget https://github.com/hadydotai/raydium-client/releases/download/0.0.4-alpha/raydium-client-0.0.4-alpha-linux-amd64.tar.gz
+tar xvf raydium-client-0.0.4-alpha-linux-amd64.tar.gz
+./raydium-client-0.0.4-alpha --help
 ```
 
 ## How to use
@@ -45,7 +45,7 @@ tar xvf raydium-client-0.0.2-alpha-linux-amd64.tar.gz
 Example (interactive/default mode):
 
 ```shell
-raydium-client-0.0.2-alpha \
+raydium-client-0.0.4-alpha \
   -hotwallet ~/.config/solana/devnet.json \
   -intent "pay 10 USDC" \
   -pool <poolID>
@@ -111,7 +111,7 @@ The intent language is deliberately tiny so you can memorize it quickly:
 Combine these with `-no-tui` for automation. Example batch run:
 
 ```shell
-raydium-client-0.0.2-alpha \
+raydium-client-0.0.4-alpha \
   -network devnet \
   -rpc https://your.custom.rpc \
   -hotwallet ~/.config/solana/hot.json \
