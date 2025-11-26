@@ -414,7 +414,6 @@ func main() {
 		poolAmmConfig:     poolAmmConfig,
 		poolAddress:       *poolAddr,
 		poolPubKey:        poolPubK,
-		tokenOrder:        tokenMints,
 		symm:              symm,
 		userSymbolAliases: make(map[string]solana.PublicKey),
 	}

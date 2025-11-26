@@ -24,7 +24,6 @@ type TableBuilder struct {
 	poolPubKey        solana.PublicKey
 	slippagePct       float64
 	slippageRat       *big.Rat
-	tokenOrder        []solana.PublicKey
 	symm              SymbolMapping
 	userSymbolAliases map[string]solana.PublicKey
 }
