@@ -77,7 +77,7 @@ Anyway, now the layout. Data is packed in a TLV format, type, length, value. We 
 these extension types are u16 bit fields that follow this enum:
 https://github.com/solana-program/token-2022/blob/main/interface/src/extension/mod.rs#L1056
 
-The length confused the hell out of me, in some areas online it appears to be a u32 2 byte field, in other areas it appears to be u16. So many conflicting accounts,
+The length confused the hell out of me, in some areas online it appears to be a u32 4 byte field, in other areas it appears to be u16. So many conflicting accounts,
 that I ended up relying exclusively on the source code of both the client and the interface for token-2022 and the implementation they have
 for tlv here (https://github.com/solana-program/libraries/tree/main/type-length-value) to try and piece it together.
 
