@@ -62,13 +62,6 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 		return "", nil, fmt.Errorf("the ticker symbol you provided is either missing from our mapping or isn't part of the pool's pair: %s", instruction.TargetSymbol)
 	}
 
-	// TODO(@hadydotai):BUG: This is a problem, poolBalances always creates slices of an exact size, so len(balances) will
-	// actually never be zero, it's not a signal for errors. In fact, neither are, balances and errs have a length.
-	// They might be zeroed out, but they're preallocated and have a length.
-	balances, errs := poolBalances(tb.ctx, tb.client, []solana.PublicKey{tb.pool.Token0Vault, tb.pool.Token1Vault})
-	if len(balances) == 0 {
-		return "", nil, errors.New("no balances available for pool")
-	}
 	builder := &strings.Builder{}
 	t := table.NewWriter()
 	t.SetOutputMirror(builder)
@@ -78,6 +71,13 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 	t.AppendHeader(table.Row{"", "Token 0", "Token 1"})
 	t.AppendRow(table.Row{"Symbol", tb.symm.SymFrom(tb.pool.Token0Mint), tb.symm.SymFrom(tb.pool.Token1Mint)})
 
+	// TODO(@hadydotai):BUG: This is a problem, poolBalances always creates slices of an exact size, so len(balances) will
+	// actually never be zero, it's not a signal for errors. In fact, neither are, balances and errs have a length.
+	// They might be zeroed out, but they're preallocated and have a length.
+	balances, errs := poolBalances(tb.ctx, tb.client, []solana.PublicKey{tb.pool.Token0Vault, tb.pool.Token1Vault})
+	if len(balances) == 0 {
+		return "", nil, errors.New("no balances available for pool")
+	}
 	balancesDisplay := make([]any, len(balances)+1)
 	balancesDisplay[0] = "Balances"
 	for i := range balances {
@@ -111,13 +111,13 @@ func (tb *TableBuilder) Build(intentLine string) (string, *CPIntent, error) {
 
 	t.AppendSeparator()
 	cp := ConstantProduct{TradeFeeRate: tb.poolAmmConfig.TradeFeeRate, SlippageRatio: slippageRat}
-	intentMeta, intentErr := NewCPIntent(cp, tb.pool, tb.poolPubKey, instruction, targetMint, balances...)
 	intentRow := table.Row{"Intent", "", ""}
 	targetTokenCell := 0
 	if targetMint.Equals(tb.pool.Token1Mint) {
 		targetTokenCell = 1
 	}
 	counterTokenCell := 1 - targetTokenCell
+	intentMeta, intentErr := NewCPIntent(cp, tb.pool, tb.poolPubKey, instruction, targetMint, balances...)
 	if intentErr != nil {
 		errMsg := fmt.Sprintf("intent failed: %s", intentErr)
 		if instruction != nil {
